@@ -26,7 +26,13 @@ const IGNORED_PROJECT_NAMES = new Set([
   "vendor",
 ]);
 
-const BLOCKED_FALSE_POSITIVE_TERMS = new Set(["centos", "ios", "onnx"]);
+const BLOCKED_FALSE_POSITIVE_TERMS = new Set([
+  "centos",
+  "graphql",
+  "ios",
+  "onnx",
+  "webview",
+]);
 
 export interface ProjectRoots {
   reposRoot?: string;
@@ -113,6 +119,17 @@ export function mergeVocabulary(...groups: string[][]) {
   return [...merged.values()];
 }
 
+export function buildVocabulary(
+  existing: string[],
+  curated: string[],
+  discovered: string[],
+  prune: boolean,
+) {
+  return prune
+    ? mergeVocabulary(curated, discovered)
+    : mergeVocabulary(existing, curated, discovered);
+}
+
 export async function loadSettingsWords(settingsPath: string) {
   const parsed = JSON.parse(
     await readFile(settingsPath, "utf8"),
@@ -149,6 +166,7 @@ export async function writeVocabularySettings(
 interface CliOptions {
   apply: boolean;
   json: boolean;
+  prune: boolean;
   reposRoot: string;
   settingsPath: string;
   vaultProjectsRoot: string;
@@ -161,6 +179,7 @@ function defaultOptions(): CliOptions {
   return {
     apply: false,
     json: false,
+    prune: false,
     reposRoot: join(userHome, "Documents", "Github"),
     settingsPath: appData
       ? join(appData, "com.pais.handy", "settings_store.json")
@@ -189,6 +208,7 @@ function parseArgs(args: string[]) {
     const next = args[index + 1];
 
     if (arg === "--apply") options.apply = true;
+    else if (arg === "--prune") options.prune = true;
     else if (arg === "--json") options.json = true;
     else if (arg === "--repos" && next) {
       options.reposRoot = next;
@@ -207,6 +227,7 @@ Usage:
 
 Options:
   --apply                  Back up and update Handy settings
+  --prune                  Drop existing terms not in curated/project sources
   --repos <directory>      Root containing local Git repositories
   --vault-projects <dir>   agentsvault Wiki/Projects directory
   --settings <file>        Handy settings_store.json path
@@ -235,12 +256,13 @@ async function main() {
       vaultProjectsRoot: options.vaultProjectsRoot,
     }),
   ]);
-  const merged = mergeVocabulary(existing, curated, discovered);
+  const merged = buildVocabulary(existing, curated, discovered, options.prune);
   const existingKeys = new Set(existing.map(normalizedKey));
   const added = merged.filter((term) => !existingKeys.has(normalizedKey(term)));
 
   const result: Record<string, unknown> = {
     applied: options.apply,
+    pruned: options.prune,
     existing: existing.length,
     added: added.length,
     total: merged.length,

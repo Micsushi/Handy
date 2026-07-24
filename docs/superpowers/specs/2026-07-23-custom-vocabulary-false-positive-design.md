@@ -8,17 +8,26 @@ Handy's fuzzy custom-word correction treats every configured term as equally eli
 - `on` becomes `ONNX`
 - `sent us` becomes `CentOS`
 
-The active vocabulary contains 294 terms, including broad technology names the user does not say. Removing only the three observed terms would leave the same failure mode available to other short or rare entries.
+The active vocabulary contains hundreds of terms, including broad technology
+names the user does not say. Removing only observed terms would leave the same
+failure mode available to the rest of the generated glossary.
 
 ## Approved behavior
 
 Use two defenses:
 
-1. Prune `iOS`, `ONNX`, and `CentOS` from the curated vocabulary and from the active settings.
+1. Prune observed false positives (`iOS`, `ONNX`, `CentOS`, `GraphQL`, and
+   `WebView`) from the curated vocabulary and from the active settings.
 2. Make fuzzy matching conservative by candidate shape:
    - Normalized custom-word keys shorter than five characters are exact-match only.
    - Multi-word candidates may fuzzy-match only normalized keys of seven or more characters.
    - Exact normalized matches remain allowed at every length.
+3. Keep the curated vocabulary focused on the user's recurring products,
+   projects, tools, and common technical acronyms instead of importing a
+   general-purpose technology glossary.
+4. Give the sync command an explicit prune mode. Normal sync preserves manual
+   additions; prune mode replaces old generated terms with the current focused
+   curated and project vocabulary.
 
 This keeps useful behavior such as `codecs` to `Codex`, `Charge B` to `ChargeBee`, and `Chat G P T` to `ChatGPT`.
 
@@ -26,12 +35,18 @@ This keeps useful behavior such as `codecs` to `Codex`, `Charge B` to `ChargeBee
 
 `apply_custom_words` already knows the candidate n-gram length and each normalized custom-word key. It will pass the candidate word count into `find_best_match`, which will reject unsafe fuzzy comparisons before Soundex scoring.
 
-The vocabulary synchronization script will maintain a blocked-term set. Its normal validation path will filter blocked terms from curated, discovered, existing, and merged vocabulary sources, so a later sync cannot restore the removed terms.
+The vocabulary synchronization script will maintain a blocked-term set. Its
+normal validation path will filter blocked terms from curated, discovered,
+existing, and merged vocabulary sources, so a later sync cannot restore the
+removed terms. Pruning is explicit so an ordinary sync cannot unexpectedly
+delete a manually added word.
 
 ## Verification
 
 - Rust regression tests prove the three false-positive examples remain ordinary speech.
 - Rust regression tests prove exact short terms and existing useful corrections still work.
-- Bun tests prove blocked terms are removed even when supplied as existing settings.
+- Script tests prove blocked terms are removed even when supplied as existing
+  settings, the curated list stays focused, and prune mode excludes obsolete
+  existing terms.
 - The active settings file is backed up before pruning.
 - Handy is rebuilt, restarted, and its loaded-settings log confirms the blocked terms are absent.

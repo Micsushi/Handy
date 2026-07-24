@@ -5,11 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  buildVocabulary,
   discoverProjectTerms,
   loadCuratedTerms,
   mergeVocabulary,
   writeVocabularySettings,
-} from "./sync-handy-vocabulary";
+} from "./sync-handy-vocabulary.ts";
 
 test("discovers repo and vault project names but skips generic folders", async () => {
   const root = await mkdtemp(join(tmpdir(), "handy-vocabulary-"));
@@ -76,10 +77,26 @@ test("merges terms without deleting existing words or duplicating casing", () =>
   ]);
 });
 
+test("prune mode drops obsolete existing terms", () => {
+  const existing = ["OldGeneratedTerm", "GraphQL"];
+  const curated = ["Codex"];
+  const discovered = ["BugMe"];
+
+  assert.deepEqual(buildVocabulary(existing, curated, discovered, false), [
+    "OldGeneratedTerm",
+    "Codex",
+    "BugMe",
+  ]);
+  assert.deepEqual(buildVocabulary(existing, curated, discovered, true), [
+    "Codex",
+    "BugMe",
+  ]);
+});
+
 test("removes blocked false-positive terms from every vocabulary source", () => {
   const merged = mergeVocabulary(
-    ["iOS", "Existing"],
-    ["ONNX", "Codex"],
+    ["iOS", "GraphQL", "Existing"],
+    ["ONNX", "WebView", "Codex"],
     ["CentOS", "BugMe"],
   );
 
@@ -89,6 +106,10 @@ test("removes blocked false-positive terms from every vocabulary source", () => 
 test("curated vocabulary contains core dictation terms", async () => {
   const terms = await loadCuratedTerms();
 
+  assert.ok(
+    terms.length <= 100,
+    `curated vocabulary has ${terms.length} terms; expected at most 100`,
+  );
   for (const expected of [
     "Codex",
     "Claude",
@@ -107,6 +128,8 @@ test("curated vocabulary contains core dictation terms", async () => {
     assert.equal(terms.includes(expected), true, expected);
   }
   assert.equal(terms.includes("codecs"), false);
+  assert.equal(terms.includes("GraphQL"), false);
+  assert.equal(terms.includes("WebView"), false);
 });
 
 test("applies vocabulary while preserving settings and creates a backup", async () => {
