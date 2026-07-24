@@ -26,6 +26,11 @@ pub use cli::CliArgs;
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use tauri_specta::{collect_commands, collect_events, Builder};
 
+#[cfg(debug_assertions)]
+fn typescript_bindings_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings.ts")
+}
+
 use env_filter::Builder as EnvFilterBuilder;
 use managers::audio::AudioRecordingManager;
 use managers::history::HistoryManager;
@@ -398,6 +403,23 @@ mod headless_guard_tests {
     }
 }
 
+#[cfg(all(test, debug_assertions))]
+mod bindings_export_path_tests {
+    use super::typescript_bindings_path;
+    use std::path::Path;
+
+    #[test]
+    fn resolves_from_the_manifest_instead_of_the_runtime_working_directory() {
+        let path = typescript_bindings_path();
+
+        assert!(path.is_absolute());
+        assert_eq!(
+            path,
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings.ts")
+        );
+    }
+}
+
 /// Headless one-shot transcription for the `--transcribe-file` / `--list-devices`
 /// path. Drives the same `TranscriptionManager::transcribe` the app uses; no
 /// mic, no VAD, no download. Returns a process exit code (0 ok, 1 runtime
@@ -719,7 +741,7 @@ pub fn run(cli_args: CliArgs) {
     specta_builder
         .export(
             Typescript::default().bigint(BigIntExportBehavior::Number),
-            "../src/bindings.ts",
+            typescript_bindings_path(),
         )
         .expect("Failed to export typescript bindings");
 
