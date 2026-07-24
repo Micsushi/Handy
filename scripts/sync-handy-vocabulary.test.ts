@@ -76,6 +76,16 @@ test("merges terms without deleting existing words or duplicating casing", () =>
   ]);
 });
 
+test("removes blocked false-positive terms from every vocabulary source", () => {
+  const merged = mergeVocabulary(
+    ["iOS", "Existing"],
+    ["ONNX", "Codex"],
+    ["CentOS", "BugMe"],
+  );
+
+  assert.deepEqual(merged, ["Existing", "Codex", "BugMe"]);
+});
+
 test("curated vocabulary contains core dictation terms", async () => {
   const terms = await loadCuratedTerms();
 

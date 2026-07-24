@@ -78,6 +78,7 @@ fn supports_soundex(key: &str) -> bool {
 /// The best matching custom word and its score, if any match was found
 fn find_best_match<'a>(
     candidate: &str,
+    candidate_word_count: usize,
     custom_words: &'a [String],
     custom_word_match_keys: &[CustomWordMatchKey],
     threshold: f64,
@@ -95,6 +96,22 @@ fn find_best_match<'a>(
         // matching significantly shorter custom words, e.g., "openaigpt" vs "openai")
         let candidate_len = candidate.chars().count();
         let custom_word_len = custom_word_key.key.chars().count();
+        let exact_match = candidate == custom_word_key.key;
+
+        // Short custom terms are too collision-prone for fuzzy matching:
+        // Soundex can otherwise turn ordinary words such as "is" into "iOS"
+        // or "on" into "ONNX". Exact normalized matches remain available.
+        if !exact_match && custom_word_len < 5 {
+            continue;
+        }
+
+        // Do not collapse an ordinary multi-word phrase into a short brand or
+        // platform name (for example, "sent us" -> "CentOS"). Longer terms
+        // still support split-word recovery such as "Charge B" -> "ChargeBee".
+        if !exact_match && candidate_word_count > 1 && custom_word_len < 7 {
+            continue;
+        }
+
         let len_diff = candidate_len.abs_diff(custom_word_len) as f64;
         let max_len = candidate_len.max(custom_word_len) as f64;
         let max_allowed_diff = (max_len * 0.25).max(2.0); // At least 2 chars difference allowed
@@ -188,7 +205,7 @@ pub fn apply_custom_words(text: &str, custom_words: &[String], threshold: f64) -
             let ngram = build_ngram(ngram_words);
 
             if let Some((replacement, score)) =
-                find_best_match(&ngram, custom_words, &custom_word_match_keys, threshold)
+                find_best_match(&ngram, n, custom_words, &custom_word_match_keys, threshold)
             {
                 let is_better = best_match
                     .as_ref()
@@ -408,6 +425,25 @@ mod tests {
         let custom_words = vec!["hello".to_string(), "world".to_string()];
         let result = apply_custom_words(text, &custom_words, 0.5);
         assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_custom_word_false_positive_guards() {
+        let custom_words = vec![
+            "iOS".to_string(),
+            "ONNX".to_string(),
+            "CentOS".to_string(),
+            "Codex".to_string(),
+        ];
+
+        assert_eq!(apply_custom_words("is", &custom_words, 0.18), "is");
+        assert_eq!(apply_custom_words("on", &custom_words, 0.18), "on");
+        assert_eq!(
+            apply_custom_words("sent us", &custom_words, 0.18),
+            "sent us"
+        );
+        assert_eq!(apply_custom_words("ios", &custom_words, 0.18), "iOS");
+        assert_eq!(apply_custom_words("codecs", &custom_words, 0.18), "Codex");
     }
 
     #[test]

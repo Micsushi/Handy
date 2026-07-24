@@ -26,6 +26,8 @@ const IGNORED_PROJECT_NAMES = new Set([
   "vendor",
 ]);
 
+const BLOCKED_FALSE_POSITIVE_TERMS = new Set(["centos", "ios", "onnx"]);
+
 export interface ProjectRoots {
   reposRoot?: string;
   vaultProjectsRoot?: string;
@@ -53,6 +55,7 @@ const validTerm = (term: string) => {
     trimmed.length <= 50 &&
     /[A-Za-z]/.test(trimmed) &&
     !trimmed.startsWith(".") &&
+    !BLOCKED_FALSE_POSITIVE_TERMS.has(normalizedKey(trimmed)) &&
     !IGNORED_PROJECT_NAMES.has(normalizedKey(trimmed))
   );
 };
