@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import {
   LIVE_PREVIEW_REVEAL_MS,
   livePreviewPresentation,
+  recordingPresentation,
 } from "./livePreviewPresentation";
 
 describe("live preview presentation", () => {
@@ -26,6 +27,28 @@ describe("live preview presentation", () => {
     assert.deepEqual(livePreviewPresentation(false, false, true), {
       open: false,
       collapsed: true,
+    });
+  });
+
+  test("shows loading until real microphone samples arrive", () => {
+    assert.deepEqual(recordingPresentation(false, false), {
+      starting: true,
+      listening: false,
+    });
+    assert.deepEqual(recordingPresentation(true, false), {
+      starting: false,
+      listening: true,
+    });
+  });
+
+  test("lets the finalizing state override capture readiness", () => {
+    assert.deepEqual(recordingPresentation(false, true), {
+      starting: false,
+      listening: false,
+    });
+    assert.deepEqual(recordingPresentation(true, true), {
+      starting: false,
+      listening: false,
     });
   });
 });

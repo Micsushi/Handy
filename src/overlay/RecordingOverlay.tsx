@@ -14,6 +14,7 @@ import { getLanguageDirection } from "@/lib/utils/rtl";
 import {
   LIVE_PREVIEW_REVEAL_MS,
   livePreviewPresentation,
+  recordingPresentation,
 } from "./livePreviewPresentation";
 
 type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
@@ -35,6 +36,7 @@ const RecordingOverlay: React.FC = () => {
   const [workKind, setWorkKind] = useState<StreamWorkKind>("transcribing");
   const [elapsed, setElapsed] = useState(0);
   const [revealReady, setRevealReady] = useState(false);
+  const [captureReady, setCaptureReady] = useState(false);
   // Bumped on each new streaming session so the Live card remounts fresh (replays
   // the pop-in, and never animates in from the previous panel's open size).
   const [session, setSession] = useState(0);
@@ -56,6 +58,20 @@ const RecordingOverlay: React.FC = () => {
   useEffect(() => {
     const setupEventListeners = async () => {
       const unlistenShow = await listen("show-overlay", async (event) => {
+        const overlayState = event.payload as OverlayState;
+        setState(overlayState);
+        if (overlayState === "recording" || overlayState === "streaming") {
+          setStreamText({ committed: "", tentative: "" });
+          setCaptureReady(false);
+        }
+        if (overlayState === "streaming") {
+          setPhase("listening");
+          setWorkKind("transcribing");
+          setElapsed(0);
+          setRevealReady(false);
+          setSession((s) => s + 1); // remount the card fresh for this session
+        }
+
         await syncLanguageFromSettings();
         // The Live panel flows downward from a top overlay and upward from a
         // bottom one; read the placement so the layout can flip to match.
@@ -69,18 +85,6 @@ const RecordingOverlay: React.FC = () => {
         } catch {
           // Keep the previous/default placement if settings can't be read.
         }
-        const overlayState = event.payload as OverlayState;
-        setState(overlayState);
-        if (overlayState === "recording" || overlayState === "streaming") {
-          setStreamText({ committed: "", tentative: "" });
-        }
-        if (overlayState === "streaming") {
-          setPhase("listening");
-          setWorkKind("transcribing");
-          setElapsed(0);
-          setRevealReady(false);
-          setSession((s) => s + 1); // remount the card fresh for this session
-        }
         setIsVisible(true);
       });
 
@@ -88,7 +92,14 @@ const RecordingOverlay: React.FC = () => {
         setIsVisible(false);
       });
 
+      const unlistenCaptureReady = await listen("capture-ready", () => {
+        setCaptureReady(true);
+      });
+
       const unlistenLevel = await listen<number[]>("mic-level", (event) => {
+        // Levels are backend-gated to active recordings. This also recovers if
+        // the one-shot capture-ready event raced the async show-overlay reset.
+        setCaptureReady(true);
         const newLevels = event.payload as number[];
         // Exponential smoothing across the 16 buckets, then take the first N
         // bars for the shared waveform.
@@ -113,6 +124,7 @@ const RecordingOverlay: React.FC = () => {
       return () => {
         unlistenShow();
         unlistenHide();
+        unlistenCaptureReady();
         unlistenLevel();
         unlistenStream();
         unlistenPhase();
@@ -132,10 +144,10 @@ const RecordingOverlay: React.FC = () => {
   // Expand promptly even before the decoder has a word hypothesis. The empty
   // text region's blinking caret confirms that live capture is active.
   useEffect(() => {
-    if (state !== "streaming" || !isVisible) return;
+    if (state !== "streaming" || !isVisible || !captureReady) return;
     const id = setTimeout(() => setRevealReady(true), LIVE_PREVIEW_REVEAL_MS);
     return () => clearTimeout(id);
-  }, [state, isVisible, session]);
+  }, [state, isVisible, session, captureReady]);
 
   // Stick to the bottom as text streams in — but only while pinned, so a user who
   // has scrolled up to read history isn't yanked back down by the next chunk.
@@ -226,6 +238,7 @@ const RecordingOverlay: React.FC = () => {
     const hasText =
       streamText.committed.length > 0 || streamText.tentative.length > 0;
     const working = phase === "working";
+    const recordingUi = recordingPresentation(captureReady, working);
     // Text opens immediately; otherwise the short reveal timer acknowledges
     // capture. Keep the panel open while finalizing so it never squishes text.
     const { open, collapsed } = livePreviewPresentation(
@@ -239,8 +252,8 @@ const RecordingOverlay: React.FC = () => {
         <div
           key={session}
           className={`scard ${open ? "open" : ""} ${collapsed ? "working" : ""} ${
-            isVisible ? "" : "leaving"
-          }`}
+            recordingUi.listening ? "capture-ready" : "capture-starting"
+          } ${isVisible ? "" : "leaving"}`}
         >
           <div className="stext">
             <div className="stext-clip">
@@ -268,7 +281,9 @@ const RecordingOverlay: React.FC = () => {
                   : t("overlay.transcribing"),
                 true,
               )
-            : listeningRow(open, true)}
+            : recordingUi.starting
+              ? workingRow(t("modelSelector.loadingGeneric"), true)
+              : listeningRow(open, true)}
         </div>
       </div>
     );
@@ -278,6 +293,7 @@ const RecordingOverlay: React.FC = () => {
   // spinner + label (transcribing / processing). Never both. The pill animates its
   // width between them; the cancel button is in both rows so it stays put.
   const working = state === "transcribing" || state === "processing";
+  const recordingUi = recordingPresentation(captureReady, working);
   const workLabel =
     state === "processing"
       ? t("overlay.processing")
@@ -289,9 +305,15 @@ const RecordingOverlay: React.FC = () => {
       className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
     >
       <div
-        className={`scard compact ${working && isVisible ? "cworking" : ""}`}
+        className={`scard compact ${working && isVisible ? "cworking" : ""} ${
+          recordingUi.listening ? "capture-ready" : "capture-starting"
+        }`}
       >
-        {working ? workingRow(workLabel, true) : listeningRow(false, true)}
+        {working
+          ? workingRow(workLabel, true)
+          : recordingUi.starting
+            ? workingRow(t("modelSelector.loadingGeneric"), true)
+            : listeningRow(false, true)}
       </div>
     </div>
   );

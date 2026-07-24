@@ -11,3 +11,11 @@ export const livePreviewPresentation = (
     collapsed: working && !open,
   };
 };
+
+export const recordingPresentation = (
+  captureReady: boolean,
+  working: boolean,
+) => ({
+  starting: !captureReady && !working,
+  listening: captureReady && !working,
+});

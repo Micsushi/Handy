@@ -101,6 +101,15 @@ fn should_use_streaming_overlay(style: OverlayStyle, is_streaming: bool) -> bool
     style == OverlayStyle::Live && is_streaming
 }
 
+fn start_capture_before_ui<T>(
+    start_capture: impl FnOnce() -> Result<T, String>,
+    show_ui: impl FnOnce(),
+) -> Result<T, String> {
+    let started = start_capture()?;
+    show_ui();
+    Ok(started)
+}
+
 async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
     if is_blank_transcription(transcription) {
         debug!("Post-processing skipped because the transcription is empty");
@@ -481,9 +490,6 @@ impl ShortcutAction for TranscribeAction {
         let kickoff_elapsed = kickoff_started.elapsed();
 
         let binding_id = binding_id.to_string();
-        let tray_started = Instant::now();
-        change_tray_icon(app, TrayIconState::Recording);
-        let tray_elapsed = tray_started.elapsed();
 
         // Get the microphone mode to determine audio feedback timing
         let plan_started = Instant::now();
@@ -513,69 +519,61 @@ impl ShortcutAction for TranscribeAction {
         }
         let plan_elapsed = plan_started.elapsed();
 
-        // Sizing the overlay follows the same advertised capability. A model that
-        // doesn't stream (or whose capability is not known yet) gets the compact
-        // pill instead of an oversized transparent live window.
-        let overlay_started = Instant::now();
-        match settings.overlay_style {
-            OverlayStyle::Live if model_supports_streaming => utils::show_streaming_overlay(app),
-            OverlayStyle::Live | OverlayStyle::Minimal => show_recording_overlay(app),
-            OverlayStyle::None => {} // show_overlay_state no-ops on None anyway
-        }
-        // Everything above runs before capture can begin, so each span here is
-        // added keypress->capture latency.
-        debug!(
-            "start-path pre-recording steps: model_kickoff={:?} tray={:?} settings+stream_plan={:?} overlay={:?}",
-            kickoff_elapsed,
-            tray_elapsed,
-            plan_elapsed,
-            overlay_started.elapsed()
-        );
         debug!("Microphone mode - always_on: {}", is_always_on);
 
-        let mut recording_error: Option<String> = None;
-        if is_always_on {
-            // Always-on mode: Play audio feedback immediately, then apply mute after sound finishes
-            debug!("Always-on mode: Playing audio feedback immediately");
-            let rm_clone = Arc::clone(&rm);
-            let app_clone = app.clone();
-            // The blocking helper exits immediately if audio feedback is disabled,
-            // so we can always reuse this thread to ensure mute happens right after playback.
-            std::thread::spawn(move || {
-                play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                rm_clone.apply_mute();
-            });
-
-            if let Err(e) = rm.try_start_recording(&binding_id, vad_policy) {
-                debug!("Recording failed: {}", e);
-                recording_error = Some(e);
-            }
-        } else {
-            // On-demand mode: Start recording first, then play audio feedback, then apply mute
-            // This allows the microphone to be activated before playing the sound
-            debug!("On-demand mode: Starting recording first, then audio feedback");
-            let recording_start_time = Instant::now();
-            match rm.try_start_recording(&binding_id, vad_policy) {
-                Ok(()) => {
-                    debug!("Recording started in {:?}", recording_start_time.elapsed());
-                    // Small delay to ensure microphone stream is active
-                    let app_clone = app.clone();
-                    let rm_clone = Arc::clone(&rm);
+        let capture_started = Instant::now();
+        let mut capture_elapsed = Duration::ZERO;
+        let mut tray_elapsed = Duration::ZERO;
+        let mut overlay_elapsed = Duration::ZERO;
+        let recording_result = start_capture_before_ui(
+            || {
+                let recording_start_time = Instant::now();
+                let app_clone = app.clone();
+                let rm_clone = Arc::clone(&rm);
+                rm.try_start_recording(&binding_id, vad_policy, move |session| {
+                    // The ready callback runs on the capture worker. Keep feedback
+                    // and mute work off that thread so audio consumption never stalls.
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        debug!("Handling delayed audio feedback/mute sequence");
-                        // Helper handles disabled audio feedback by returning early, so we reuse it
-                        // to keep mute sequencing consistent in every mode.
+                        debug!("First captured chunk ready; handling audio feedback/mute");
                         play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                        rm_clone.apply_mute();
+                        rm_clone.apply_mute_for_session(session);
                     });
+                })
+                .inspect(|()| {
+                    debug!("Recording started in {:?}", recording_start_time.elapsed());
+                })
+                .inspect_err(|e| debug!("Failed to start recording: {}", e))
+            },
+            || {
+                capture_elapsed = capture_started.elapsed();
+
+                let tray_started = Instant::now();
+                change_tray_icon(app, TrayIconState::Recording);
+                tray_elapsed = tray_started.elapsed();
+
+                // Sizing the overlay follows the same advertised capability. A model that
+                // doesn't stream (or whose capability is not known yet) gets the compact
+                // pill instead of an oversized transparent live window.
+                let overlay_started = Instant::now();
+                match settings.overlay_style {
+                    OverlayStyle::Live if model_supports_streaming => {
+                        utils::show_streaming_overlay(app)
+                    }
+                    OverlayStyle::Live | OverlayStyle::Minimal => show_recording_overlay(app),
+                    OverlayStyle::None => {} // show_overlay_state no-ops on None anyway
                 }
-                Err(e) => {
-                    debug!("Failed to start recording: {}", e);
-                    recording_error = Some(e);
-                }
-            }
-        }
+                overlay_elapsed = overlay_started.elapsed();
+            },
+        );
+        debug!(
+            "start-path capture-first steps: model_kickoff={:?} settings+stream_plan={:?} capture={:?} tray={:?} overlay={:?}",
+            kickoff_elapsed,
+            plan_elapsed,
+            capture_elapsed,
+            tray_elapsed,
+            overlay_elapsed
+        );
+        let recording_error = recording_result.err();
 
         if recording_error.is_none() {
             // Dynamically register the cancel shortcut in a separate task to avoid deadlock
@@ -638,7 +636,7 @@ impl ShortcutAction for TranscribeAction {
         }
 
         // Unmute before playing audio feedback so the stop sound is audible
-        rm.remove_mute();
+        rm.finish_mute_session();
 
         // Play audio feedback for recording stop
         play_feedback_sound(app, SoundType::Stop);
@@ -927,7 +925,10 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 
 #[cfg(test)]
 mod tests {
-    use super::{complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay};
+    use super::{
+        complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay,
+        start_capture_before_ui,
+    };
     use crate::settings::OverlayStyle;
     use std::future;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -982,5 +983,34 @@ mod tests {
         assert!(!should_use_streaming_overlay(OverlayStyle::Live, false));
         assert!(!should_use_streaming_overlay(OverlayStyle::Minimal, true));
         assert!(!should_use_streaming_overlay(OverlayStyle::None, true));
+    }
+
+    #[test]
+    fn capture_starts_before_recording_ui() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let result = start_capture_before_ui(
+            || {
+                calls.borrow_mut().push("capture");
+                Ok("started")
+            },
+            || calls.borrow_mut().push("ui"),
+        );
+
+        assert_eq!(result, Ok("started"));
+        assert_eq!(calls.into_inner(), vec!["capture", "ui"]);
+    }
+
+    #[test]
+    fn capture_failure_does_not_show_recording_ui() {
+        let ui_was_shown = std::cell::Cell::new(false);
+
+        let result = start_capture_before_ui(
+            || Err::<(), _>("microphone unavailable".to_string()),
+            || ui_was_shown.set(true),
+        );
+
+        assert_eq!(result, Err("microphone unavailable".to_string()));
+        assert!(!ui_was_shown.get());
     }
 }

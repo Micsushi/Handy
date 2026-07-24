@@ -13,12 +13,102 @@ use crate::utils;
 use log::{debug, error, info, warn};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const VAD_THRESHOLD: f32 = 0.3;
+type CaptureReadyAction = Box<dyn FnOnce() + Send + 'static>;
+type SharedCaptureReadyAction = Arc<Mutex<Option<CaptureReadyAction>>>;
+
+#[derive(Clone, Default)]
+struct RecordingSessionGate {
+    generation: Arc<Mutex<u64>>,
+}
+
+impl RecordingSessionGate {
+    fn begin(&self) -> u64 {
+        let mut generation = self.generation.lock().unwrap();
+        *generation = generation.wrapping_add(1);
+        *generation
+    }
+
+    fn invalidate(&self) {
+        let mut generation = self.generation.lock().unwrap();
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn run_if_current(&self, session: u64, action: impl FnOnce()) -> bool {
+        let generation = self.generation.lock().unwrap();
+        if *generation != session {
+            return false;
+        }
+        action();
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LazyCloseCommand {
+    Schedule,
+    Cancel,
+}
+
+#[derive(Default)]
+struct LazyCloseTimer {
+    deadline: Option<Instant>,
+}
+
+impl LazyCloseTimer {
+    fn schedule(&mut self, now: Instant, timeout: Duration) {
+        self.deadline = Some(now + timeout);
+    }
+
+    fn cancel(&mut self) {
+        self.deadline = None;
+    }
+
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+}
+
+fn run_lazy_close_worker(
+    rx: mpsc::Receiver<LazyCloseCommand>,
+    timeout: Duration,
+    mut close_if_idle: impl FnMut(),
+) {
+    while let Ok(command) = rx.recv() {
+        if !matches!(command, LazyCloseCommand::Schedule) {
+            continue;
+        }
+
+        let mut timer = LazyCloseTimer::default();
+        timer.schedule(Instant::now(), timeout);
+        loop {
+            let remaining = timer
+                .remaining(Instant::now())
+                .expect("scheduled lazy-close timer must have a deadline");
+            match rx.recv_timeout(remaining) {
+                Ok(LazyCloseCommand::Schedule) => {
+                    timer.schedule(Instant::now(), timeout);
+                }
+                Ok(LazyCloseCommand::Cancel) => {
+                    timer.cancel();
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    timer.cancel();
+                    close_if_idle();
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+}
 
 fn set_mute(mute: bool) {
     // Expected behavior:
@@ -263,6 +353,7 @@ fn create_audio_recorder(
     vad_path: &Path,
     app_handle: &tauri::AppHandle,
     stream_router: Arc<StreamRouter>,
+    capture_ready_action: SharedCaptureReadyAction,
 ) -> Result<AudioRecorder, anyhow::Error> {
     // A single Silero engine covers both the offline and streaming policies (never
     // active at once within a recording), so the recorder reconfigures its
@@ -297,6 +388,15 @@ fn create_audio_recorder(
             move |frame| {
                 router.feed(frame);
             }
+        })
+        .with_capture_ready_callback({
+            let app_handle = app_handle.clone();
+            move || {
+                let _ = app_handle.emit_to("recording_overlay", "capture-ready", ());
+                if let Some(action) = capture_ready_action.lock().unwrap().take() {
+                    action();
+                }
+            }
         });
 
     Ok(recorder)
@@ -314,7 +414,9 @@ pub struct AudioRecordingManager {
     is_open: Arc<Mutex<bool>>,
     is_recording: Arc<Mutex<bool>>,
     mute_state: Arc<Mutex<MuteState>>,
-    close_generation: Arc<AtomicU64>,
+    capture_ready_action: SharedCaptureReadyAction,
+    recording_session_gate: RecordingSessionGate,
+    lazy_close_tx: mpsc::Sender<LazyCloseCommand>,
     cancel_generation: Arc<AtomicU64>,
     stream_router: Arc<StreamRouter>,
     /// Resolution of a *named* microphone (selected or clamshell) to its cpal
@@ -339,6 +441,7 @@ impl AudioRecordingManager {
         } else {
             MicrophoneMode::OnDemand
         };
+        let (lazy_close_tx, lazy_close_rx) = mpsc::channel();
 
         let manager = Self {
             state: Arc::new(Mutex::new(RecordingState::Idle)),
@@ -349,11 +452,32 @@ impl AudioRecordingManager {
             is_open: Arc::new(Mutex::new(false)),
             is_recording: Arc::new(Mutex::new(false)),
             mute_state: Arc::new(Mutex::new(MuteState::default())),
-            close_generation: Arc::new(AtomicU64::new(0)),
+            capture_ready_action: Arc::new(Mutex::new(None)),
+            recording_session_gate: RecordingSessionGate::default(),
+            lazy_close_tx,
             cancel_generation: Arc::new(AtomicU64::new(0)),
             stream_router,
             cached_device: Arc::new(Mutex::new(None)),
         };
+
+        let worker_app = app.clone();
+        std::thread::Builder::new()
+            .name("handy-mic-lazy-close".to_string())
+            .spawn(move || {
+                run_lazy_close_worker(lazy_close_rx, STREAM_IDLE_TIMEOUT, move || {
+                    let rm = worker_app.state::<Arc<AudioRecordingManager>>();
+                    // Hold state across the idle check and close so recording
+                    // startup cannot race a timeout into closing an active stream.
+                    let state = rm.state.lock().unwrap();
+                    if matches!(*state, RecordingState::Idle) {
+                        info!(
+                            "Closing idle microphone stream after {:?}",
+                            STREAM_IDLE_TIMEOUT
+                        );
+                        rm.stop_microphone_stream();
+                    }
+                });
+            })?;
 
         // Always-on?  Open immediately.
         if matches!(mode, MicrophoneMode::AlwaysOn) {
@@ -430,27 +554,11 @@ impl AudioRecordingManager {
     }
 
     fn schedule_lazy_close(&self) {
-        let gen = self.close_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let app = self.app_handle.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(STREAM_IDLE_TIMEOUT);
-            let rm = app.state::<Arc<AudioRecordingManager>>();
-            // Hold state lock across the check AND close to serialize against
-            // try_start_recording, preventing a race where the stream is closed
-            // under an active recording.
-            let state = rm.state.lock().unwrap();
-            if rm.close_generation.load(Ordering::SeqCst) == gen
-                && matches!(*state, RecordingState::Idle)
-            {
-                // stop_microphone_stream does not acquire the state lock,
-                // so holding it here is safe (no deadlock).
-                info!(
-                    "Closing idle microphone stream after {:?}",
-                    STREAM_IDLE_TIMEOUT
-                );
-                rm.stop_microphone_stream();
-            }
-        });
+        let _ = self.lazy_close_tx.send(LazyCloseCommand::Schedule);
+    }
+
+    fn cancel_lazy_close(&self) {
+        let _ = self.lazy_close_tx.send(LazyCloseCommand::Cancel);
     }
 
     /* ---------- microphone life-cycle -------------------------------------- */
@@ -495,6 +603,16 @@ impl AudioRecordingManager {
         }
     }
 
+    pub fn apply_mute_for_session(&self, session: u64) {
+        self.recording_session_gate
+            .run_if_current(session, || self.apply_mute());
+    }
+
+    pub fn finish_mute_session(&self) {
+        self.recording_session_gate.invalidate();
+        self.remove_mute();
+    }
+
     pub fn preload_vad(&self) -> Result<(), anyhow::Error> {
         let mut recorder_opt = self.recorder.lock().unwrap();
         if recorder_opt.is_none() {
@@ -510,6 +628,7 @@ impl AudioRecordingManager {
                 &vad_path,
                 &self.app_handle,
                 Arc::clone(&self.stream_router),
+                Arc::clone(&self.capture_ready_action),
             )?);
         }
         Ok(())
@@ -586,17 +705,10 @@ impl AudioRecordingManager {
     }
 
     pub fn stop_microphone_stream(&self) {
+        self.finish_mute_session();
         let mut open_flag = self.is_open.lock().unwrap();
         if !*open_flag {
             return;
-        }
-
-        {
-            let mut mute_guard = self.mute_state.lock().unwrap();
-            if mute_guard.did_mute {
-                restore_mute(mute_guard.prev_muted);
-            }
-            mute_guard.did_mute = false;
         }
 
         if let Some(rec) = self.recorder.lock().unwrap().as_mut() {
@@ -620,12 +732,12 @@ impl AudioRecordingManager {
         match (cur_mode, &new_mode) {
             (MicrophoneMode::AlwaysOn, MicrophoneMode::OnDemand) => {
                 if matches!(*self.state.lock().unwrap(), RecordingState::Idle) {
-                    self.close_generation.fetch_add(1, Ordering::SeqCst);
+                    self.cancel_lazy_close();
                     self.stop_microphone_stream();
                 }
             }
             (MicrophoneMode::OnDemand, MicrophoneMode::AlwaysOn) => {
-                self.close_generation.fetch_add(1, Ordering::SeqCst);
+                self.cancel_lazy_close();
                 self.start_microphone_stream()?;
             }
             _ => {}
@@ -637,18 +749,22 @@ impl AudioRecordingManager {
 
     /* ---------- recording --------------------------------------------------- */
 
-    pub fn try_start_recording(
+    pub fn try_start_recording<F>(
         &self,
         binding_id: &str,
         vad_policy: VadPolicy,
-    ) -> Result<(), String> {
+        on_capture_ready: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(u64) + Send + 'static,
+    {
         let mut state = self.state.lock().unwrap();
 
         if let RecordingState::Idle = *state {
             // Ensure microphone is open in on-demand mode
             if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
                 // Cancel any pending lazy close
-                self.close_generation.fetch_add(1, Ordering::SeqCst);
+                self.cancel_lazy_close();
                 if let Err(e) = self.start_microphone_stream() {
                     let msg = format!("{e}");
                     error!("Failed to open microphone stream: {msg}");
@@ -657,6 +773,9 @@ impl AudioRecordingManager {
             }
 
             if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
+                let session = self.recording_session_gate.begin();
+                *self.capture_ready_action.lock().unwrap() =
+                    Some(Box::new(move || on_capture_ready(session)));
                 if rec.start(vad_policy).is_ok() {
                     *self.is_recording.lock().unwrap() = true;
                     *state = RecordingState::Recording {
@@ -665,6 +784,8 @@ impl AudioRecordingManager {
                     debug!("Recording started for binding {binding_id}");
                     return Ok(());
                 }
+                self.capture_ready_action.lock().unwrap().take();
+                self.finish_mute_session();
             }
             Err("Recorder not available".to_string())
         } else {
@@ -679,7 +800,7 @@ impl AudioRecordingManager {
         self.invalidate_device_cache();
         // If currently open, restart the microphone stream to use the new device
         if *self.is_open.lock().unwrap() {
-            self.close_generation.fetch_add(1, Ordering::SeqCst);
+            self.cancel_lazy_close();
             self.stop_microphone_stream();
             self.start_microphone_stream()?;
         }
@@ -740,6 +861,7 @@ impl AudioRecordingManager {
                 };
 
                 *self.is_recording.lock().unwrap() = false;
+                self.capture_ready_action.lock().unwrap().take();
                 *self.state.lock().unwrap() = RecordingState::Idle;
 
                 // In on-demand mode, close the mic (lazily if the setting is enabled)
@@ -780,6 +902,7 @@ impl AudioRecordingManager {
     /// Cancel any ongoing recording without returning audio samples
     pub fn cancel_recording(&self) {
         self.cancel_generation.fetch_add(1, Ordering::AcqRel);
+        self.finish_mute_session();
         let mut state = self.state.lock().unwrap();
 
         match *state {
@@ -792,6 +915,7 @@ impl AudioRecordingManager {
                 }
 
                 *self.is_recording.lock().unwrap() = false;
+                self.capture_ready_action.lock().unwrap().take();
 
                 // In on-demand mode, close the mic (lazily if the setting is enabled)
                 if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
@@ -807,5 +931,68 @@ impl AudioRecordingManager {
             }
             RecordingState::Idle => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lazy_stream_close_keeps_the_microphone_warm_for_five_minutes() {
+        assert_eq!(STREAM_IDLE_TIMEOUT, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn lazy_close_timer_resets_from_the_latest_schedule() {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(60);
+        let mut timer = LazyCloseTimer::default();
+
+        timer.schedule(start, timeout);
+        timer.schedule(start + Duration::from_secs(40), timeout);
+
+        assert_eq!(
+            timer.remaining(start + Duration::from_secs(75)),
+            Some(Duration::from_secs(25))
+        );
+    }
+
+    #[test]
+    fn lazy_close_timer_cancels_without_a_deadline() {
+        let mut timer = LazyCloseTimer::default();
+        timer.schedule(Instant::now(), Duration::from_secs(60));
+        timer.cancel();
+
+        assert_eq!(timer.remaining(Instant::now()), None);
+    }
+
+    #[test]
+    fn lazy_close_worker_fires_one_scheduled_timeout() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            run_lazy_close_worker(rx, Duration::from_millis(10), move || {
+                let _ = closed_tx.send(());
+            });
+        });
+
+        tx.send(LazyCloseCommand::Schedule).unwrap();
+        assert!(closed_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        drop(tx);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn invalidated_recording_session_cannot_apply_late_mute() {
+        let gate = RecordingSessionGate::default();
+        let session = gate.begin();
+        gate.invalidate();
+        let mute_applied = std::cell::Cell::new(false);
+
+        let applied = gate.run_if_current(session, || mute_applied.set(true));
+
+        assert!(!applied);
+        assert!(!mute_applied.get());
     }
 }

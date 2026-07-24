@@ -69,6 +69,7 @@ impl VadConfig {
 /// Callback invoked with each 16 kHz mono frame that passes the active capture
 /// policy while recording. Used to feed a live streaming transcription as audio arrives.
 pub type AudioFrameCallback = Arc<dyn Fn(&[f32]) + Send + Sync + 'static>;
+pub type CaptureReadyCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 pub struct AudioRecorder {
     device: Option<Device>,
@@ -77,6 +78,7 @@ pub struct AudioRecorder {
     vad: Option<VadConfig>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
     audio_cb: Option<AudioFrameCallback>,
+    capture_ready_cb: Option<CaptureReadyCallback>,
     /// Preferred stream config cached per device name. The two HAL property
     /// queries in `get_preferred_config` cost ~40-85ms per open (worse on
     /// USB/Bluetooth), which lands on the keypress->capture path in on-demand
@@ -95,6 +97,7 @@ impl AudioRecorder {
             vad: None,
             level_cb: None,
             audio_cb: None,
+            capture_ready_cb: None,
             config_cache: Arc::new(Mutex::new(None)),
         })
     }
@@ -136,6 +139,14 @@ impl AudioRecorder {
         self
     }
 
+    pub fn with_capture_ready_callback<F>(mut self, cb: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.capture_ready_cb = Some(Arc::new(cb));
+        self
+    }
+
     pub fn open(&mut self, device: Option<Device>) -> Result<(), Box<dyn std::error::Error>> {
         if self.worker_handle.is_some() {
             return Ok(()); // already open
@@ -159,6 +170,7 @@ impl AudioRecorder {
         let level_cb = self.level_cb.clone();
         // Move the optional real-time audio frame callback into the worker thread
         let audio_cb = self.audio_cb.clone();
+        let capture_ready_cb = self.capture_ready_cb.clone();
         let config_cache = Arc::clone(&self.config_cache);
 
         let worker = std::thread::spawn(move || {
@@ -275,6 +287,7 @@ impl AudioRecorder {
                         cmd_rx,
                         level_cb,
                         audio_cb,
+                        capture_ready_cb,
                         stop_flag,
                         stream_running_at,
                     );
@@ -472,7 +485,13 @@ pub fn is_no_input_device_error(error_message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_microphone_access_denied, is_no_input_device_error};
+    use super::{
+        is_microphone_access_denied, is_no_input_device_error, run_consumer, AudioChunk, Cmd,
+        VadPolicy,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Instant;
 
     #[test]
     fn detects_access_is_denied() {
@@ -511,6 +530,76 @@ mod tests {
         assert!(!is_no_input_device_error("permission denied"));
         assert!(!is_no_input_device_error("device not found"));
     }
+
+    #[test]
+    fn idle_stream_does_not_emit_microphone_levels() {
+        let (sample_tx, sample_rx) = mpsc::channel();
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let level_count = Arc::new(AtomicUsize::new(0));
+        let level_count_for_callback = Arc::clone(&level_count);
+
+        let worker = std::thread::spawn(move || {
+            run_consumer(
+                16_000,
+                None,
+                sample_rx,
+                cmd_rx,
+                Some(Arc::new(move |_| {
+                    level_count_for_callback.fetch_add(1, Ordering::SeqCst);
+                })),
+                None,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now(),
+            );
+        });
+
+        sample_tx
+            .send(AudioChunk::Samples(vec![0.25; 512]))
+            .unwrap();
+        drop(sample_tx);
+        worker.join().unwrap();
+
+        assert_eq!(level_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn first_captured_chunk_emits_readiness_once() {
+        let (sample_tx, sample_rx) = mpsc::channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let ready_count = Arc::new(AtomicUsize::new(0));
+        let ready_count_for_callback = Arc::clone(&ready_count);
+
+        let worker = std::thread::spawn(move || {
+            run_consumer(
+                16_000,
+                None,
+                sample_rx,
+                cmd_rx,
+                None,
+                None,
+                Some(Arc::new(move || {
+                    ready_count_for_callback.fetch_add(1, Ordering::SeqCst);
+                })),
+                Arc::new(AtomicBool::new(false)),
+                Instant::now(),
+            );
+        });
+
+        cmd_tx
+            .send(Cmd::Start(VadPolicy::Disabled, Instant::now()))
+            .unwrap();
+        sample_tx
+            .send(AudioChunk::Samples(vec![0.25; 512]))
+            .unwrap();
+        sample_tx
+            .send(AudioChunk::Samples(vec![0.25; 512]))
+            .unwrap();
+        drop(sample_tx);
+        worker.join().unwrap();
+
+        assert_eq!(ready_count.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -521,6 +610,7 @@ fn run_consumer(
     cmd_rx: mpsc::Receiver<Cmd>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
     audio_cb: Option<AudioFrameCallback>,
+    capture_ready_cb: Option<CaptureReadyCallback>,
     stop_flag: Arc<AtomicBool>,
     stream_running_at: Instant,
 ) {
@@ -714,10 +804,25 @@ fn run_consumer(
             );
         }
 
+        if recording {
+            if let Some(started) = awaiting_first_captured_chunk.take() {
+                log::debug!(
+                    "first captured chunk ({:.1}ms of audio) processed {:?} after Cmd::Start",
+                    chunk_ms,
+                    started.elapsed()
+                );
+                if let Some(cb) = &capture_ready_cb {
+                    cb();
+                }
+            }
+        }
+
         // ---------- spectrum processing ---------------------------------- //
-        if let Some(buckets) = visualizer.feed(&raw) {
-            if let Some(cb) = &level_cb {
-                cb(buckets);
+        if recording {
+            if let Some(buckets) = visualizer.feed(&raw) {
+                if let Some(cb) = &level_cb {
+                    cb(buckets);
+                }
             }
         }
 
@@ -732,15 +837,5 @@ fn run_consumer(
                 &mut processed_samples,
             )
         });
-
-        if recording {
-            if let Some(started) = awaiting_first_captured_chunk.take() {
-                log::debug!(
-                    "first captured chunk ({:.1}ms of audio) processed {:?} after Cmd::Start",
-                    chunk_ms,
-                    started.elapsed()
-                );
-            }
-        }
     }
 }
