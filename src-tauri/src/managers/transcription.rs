@@ -17,8 +17,8 @@ use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_specta::Event;
 use transcribe_cpp::{
-    Backend, Feature, Model, ModelOptions, RunExtension, RunOptions, Session, StreamOptions, Task,
-    WhisperRunOptions,
+    Backend, CommitPolicy, Feature, Model, ModelOptions, ParakeetBufferedStreamOptions,
+    RunExtension, RunOptions, Session, StreamExtension, StreamOptions, Task, WhisperRunOptions,
 };
 use transcribe_rs::{
     onnx::{
@@ -924,9 +924,9 @@ impl TranscriptionManager {
             // call `session.model()` once it exists.
             let backend = session.model().backend();
 
-            // StreamOptions::default() uses CommitPolicy::Auto and lets the
-            // family pick its own streaming strategy (no family-specific ext).
-            let mut stream = match session.stream(&run_options, &StreamOptions::default()) {
+            let stream_options =
+                live_preview_stream_options(&session.model().arch(), &session.model().variant());
+            let mut stream = match session.stream(&run_options, &stream_options) {
                 Ok(s) => s,
                 Err(e) => {
                     error!("Failed to begin stream: {}", e);
@@ -959,8 +959,13 @@ impl TranscriptionManager {
                                 );
                                 if update.committed_changed || update.tentative_changed {
                                     let text = stream.text();
+                                    let (committed, tentative) = correct_live_preview_text(
+                                        &text.committed,
+                                        &text.tentative,
+                                        &settings,
+                                    );
                                     perf.record_emit();
-                                    self.emit_stream_text(&text.committed, &text.tentative);
+                                    self.emit_stream_text(&committed, &tentative);
                                 }
                                 perf.maybe_log();
                             }
@@ -1605,6 +1610,54 @@ fn transcribe_cpp_run_plan(
     }
 }
 
+/// Prefer quick, rewriteable hypotheses for the live overlay. Parakeet Unified's
+/// native best-accuracy geometry waits for a 1040 ms chunk plus 1040 ms of right
+/// context. Its trained menu also supports 560 + 80 ms, which gives the overlay
+/// a first provisional decode after roughly 640 ms. OnFinalize keeps that text
+/// fully tentative, so the preview can revise freely until recording stops.
+fn live_preview_stream_options(arch: &str, variant: &str) -> StreamOptions {
+    if arch == "parakeet" && variant == "unified-en-0.6b" {
+        return StreamOptions {
+            commit_policy: CommitPolicy::OnFinalize,
+            family: Some(StreamExtension::ParakeetBuffered(
+                ParakeetBufferedStreamOptions {
+                    left_ms: None,
+                    chunk_ms: Some(560),
+                    right_ms: Some(80),
+                },
+            )),
+            ..Default::default()
+        };
+    }
+
+    StreamOptions::default()
+}
+
+/// Apply the user's vocabulary to provisional text before it reaches the
+/// overlay. Keep committed and tentative segments separate so their rendering
+/// semantics stay intact. Any optional correction failure returns raw text.
+fn correct_live_preview_text(
+    committed: &str,
+    tentative: &str,
+    settings: &AppSettings,
+) -> (String, String) {
+    let correct = |raw: &str| {
+        if settings.custom_words.is_empty() {
+            return raw.to_string();
+        }
+
+        fail_open_text_transform(raw.to_string(), |text| {
+            apply_custom_words(
+                &text,
+                &settings.custom_words,
+                settings.word_correction_threshold,
+            )
+        })
+    };
+
+    (correct(committed), correct(tentative))
+}
+
 fn post_process_transcription_text(
     raw: String,
     settings: &AppSettings,
@@ -2024,6 +2077,18 @@ mod tests {
     }
 
     #[test]
+    fn live_preview_applies_custom_words_before_finalize() {
+        let mut settings = AppSettings::default();
+        settings.custom_words = vec!["Codex".to_string(), "Claude Code".to_string()];
+
+        let (committed, tentative) =
+            correct_live_preview_text("", "using codecs and clawed code", &settings);
+
+        assert_eq!(committed, "");
+        assert_eq!(tentative, "using Codex and Claude Code");
+    }
+
+    #[test]
     fn transcribe_cpp_run_plan_maps_chinese_variants() {
         let plan = transcribe_cpp_run_plan(false, "zh-Hant", &languages(&["zh"]), true);
 
@@ -2057,6 +2122,39 @@ mod tests {
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("es"));
         assert_eq!(plan.target_language, None);
+    }
+
+    #[test]
+    fn unified_parakeet_live_preview_prefers_subsecond_unstable_text() {
+        let options = live_preview_stream_options("parakeet", "unified-en-0.6b");
+
+        assert!(matches!(
+            options.commit_policy,
+            transcribe_cpp::CommitPolicy::OnFinalize
+        ));
+        assert_eq!(options.stable_prefix_agreement_n, 0);
+        assert!(matches!(
+            options.family,
+            Some(transcribe_cpp::StreamExtension::ParakeetBuffered(
+                transcribe_cpp::ParakeetBufferedStreamOptions {
+                    left_ms: None,
+                    chunk_ms: Some(560),
+                    right_ms: Some(80),
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn other_models_keep_their_native_streaming_defaults() {
+        assert_eq!(
+            live_preview_stream_options("parakeet", "nemotron-speech-streaming-en-0.6b"),
+            StreamOptions::default()
+        );
+        assert_eq!(
+            live_preview_stream_options("moonshine", "tiny"),
+            StreamOptions::default()
+        );
     }
 }
 

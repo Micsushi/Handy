@@ -11,6 +11,10 @@ import type {
 } from "@/bindings";
 import i18n, { syncLanguageFromSettings } from "@/i18n";
 import { getLanguageDirection } from "@/lib/utils/rtl";
+import {
+  LIVE_PREVIEW_REVEAL_MS,
+  livePreviewPresentation,
+} from "./livePreviewPresentation";
 
 type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
 
@@ -30,6 +34,7 @@ const RecordingOverlay: React.FC = () => {
   const [phase, setPhase] = useState<StreamPhase>("listening");
   const [workKind, setWorkKind] = useState<StreamWorkKind>("transcribing");
   const [elapsed, setElapsed] = useState(0);
+  const [revealReady, setRevealReady] = useState(false);
   // Bumped on each new streaming session so the Live card remounts fresh (replays
   // the pop-in, and never animates in from the previous panel's open size).
   const [session, setSession] = useState(0);
@@ -73,6 +78,7 @@ const RecordingOverlay: React.FC = () => {
           setPhase("listening");
           setWorkKind("transcribing");
           setElapsed(0);
+          setRevealReady(false);
           setSession((s) => s + 1); // remount the card fresh for this session
         }
         setIsVisible(true);
@@ -122,6 +128,14 @@ const RecordingOverlay: React.FC = () => {
     const id = setInterval(() => setElapsed((e) => e + 1), 1000);
     return () => clearInterval(id);
   }, [state, isVisible]);
+
+  // Expand promptly even before the decoder has a word hypothesis. The empty
+  // text region's blinking caret confirms that live capture is active.
+  useEffect(() => {
+    if (state !== "streaming" || !isVisible) return;
+    const id = setTimeout(() => setRevealReady(true), LIVE_PREVIEW_REVEAL_MS);
+    return () => clearTimeout(id);
+  }, [state, isVisible, session]);
 
   // Stick to the bottom as text streams in — but only while pinned, so a user who
   // has scrolled up to read history isn't yanked back down by the next chunk.
@@ -212,12 +226,13 @@ const RecordingOverlay: React.FC = () => {
     const hasText =
       streamText.committed.length > 0 || streamText.tentative.length > 0;
     const working = phase === "working";
-    // Keep the panel open whenever there's text — even while finalizing — so the
-    // transcript stays put under a working spinner instead of collapsing and
-    // squishing the text mid-stream. Only fall back to the small working pill
-    // when there was no text to preserve.
-    const open = hasText;
-    const collapsed = working && !hasText;
+    // Text opens immediately; otherwise the short reveal timer acknowledges
+    // capture. Keep the panel open while finalizing so it never squishes text.
+    const { open, collapsed } = livePreviewPresentation(
+      hasText,
+      revealReady,
+      working,
+    );
 
     return (
       <div dir={direction} className={`ov-stage ${position}`}>
