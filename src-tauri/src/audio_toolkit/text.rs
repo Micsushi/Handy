@@ -135,7 +135,7 @@ fn find_best_match<'a>(
 
         // Combine scores: favor phonetic matches, but also consider string similarity
         let combined_score = if phonetic_match {
-            levenshtein_score * 0.3 // Give significant boost to phonetic matches
+            levenshtein_score * 0.5
         } else {
             levenshtein_score
         };
@@ -434,6 +434,8 @@ mod tests {
             "ONNX".to_string(),
             "CentOS".to_string(),
             "Codex".to_string(),
+            "Workday".to_string(),
+            "Anthropic".to_string(),
         ];
 
         assert_eq!(apply_custom_words("is", &custom_words, 0.18), "is");
@@ -441,6 +443,11 @@ mod tests {
         assert_eq!(
             apply_custom_words("sent us", &custom_words, 0.18),
             "sent us"
+        );
+        assert_eq!(apply_custom_words("worked", &custom_words, 0.18), "worked");
+        assert_eq!(
+            apply_custom_words("another thing", &custom_words, 0.18),
+            "another thing"
         );
         assert_eq!(apply_custom_words("ios", &custom_words, 0.18), "iOS");
         assert_eq!(apply_custom_words("codecs", &custom_words, 0.18), "Codex");

@@ -9,7 +9,6 @@
     "Codex CLI",
     "Claude",
     "Claude Code",
-    "Anthropic",
     "Gemini",
     "Gemini CLI",
     "Copilot",
@@ -29,7 +28,6 @@
     "RAG",
     "MCP",
     "LinkedIn",
-    "Workday",
     "OpenSpec",
     "OpenCode",
     "OpenClaw",
@@ -94,9 +92,6 @@
     "HTTPS",
     "SSH",
     "URL",
-    "OAuth",
-    "frontend",
-    "backend",
-    "codebase"
+    "OAuth"
   ]
 }

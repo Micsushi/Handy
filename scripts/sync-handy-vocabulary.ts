@@ -8,30 +8,41 @@ const CURATED_TERMS_PATH = fileURLToPath(
 );
 
 const IGNORED_PROJECT_NAMES = new Set([
+  "ansible_homelab",
   "build",
+  "career-ops",
   "dist",
   "cl",
+  "hunt",
+  "hunt-worktrees",
   "node_modules",
   "lo",
   "look-into-the-poe-overlay-ii",
+  "merge-worktrees",
+  "noise-suppression-for-voice",
   "projects",
   "pul",
+  "server_ansible_setup",
   "src",
   "start-with-making-the-vault-with-2",
   "temp",
   "temporary",
   "test",
   "tests",
+  "tmp",
   "up",
   "vendor",
+  "vibekanbanfork",
 ]);
 
 const BLOCKED_FALSE_POSITIVE_TERMS = new Set([
+  "anthropic",
   "centos",
   "graphql",
   "ios",
   "onnx",
   "webview",
+  "workday",
 ]);
 
 export interface ProjectRoots {

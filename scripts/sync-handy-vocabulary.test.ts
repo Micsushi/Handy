@@ -27,6 +27,15 @@ test("discovers repo and vault project names but skips generic folders", async (
     "cl",
     "pul",
     "up",
+    "tmp",
+    "Hunt",
+    "hunt-worktrees",
+    "merge-worktrees",
+    "noise-suppression-for-voice",
+    "server_ansible_setup",
+    "ansible_homelab",
+    "career-ops",
+    "VibeKanbanFork",
     "start-with-making-the-vault-with-2",
   ]) {
     await mkdir(join(reposRoot, name), { recursive: true });
@@ -57,6 +66,15 @@ test("discovers repo and vault project names but skips generic folders", async (
   assert.equal(terms.includes("cl"), false);
   assert.equal(terms.includes("pul"), false);
   assert.equal(terms.includes("up"), false);
+  assert.equal(terms.includes("tmp"), false);
+  assert.equal(terms.includes("Hunt"), false);
+  assert.equal(terms.includes("hunt-worktrees"), false);
+  assert.equal(terms.includes("merge-worktrees"), false);
+  assert.equal(terms.includes("noise-suppression-for-voice"), false);
+  assert.equal(terms.includes("server_ansible_setup"), false);
+  assert.equal(terms.includes("ansible_homelab"), false);
+  assert.equal(terms.includes("career-ops"), false);
+  assert.equal(terms.includes("VibeKanbanFork"), false);
   assert.equal(terms.includes("start-with-making-the-vault-with-2"), false);
 });
 
@@ -95,8 +113,8 @@ test("prune mode drops obsolete existing terms", () => {
 
 test("removes blocked false-positive terms from every vocabulary source", () => {
   const merged = mergeVocabulary(
-    ["iOS", "GraphQL", "Existing"],
-    ["ONNX", "WebView", "Codex"],
+    ["iOS", "GraphQL", "Workday", "Existing"],
+    ["ONNX", "WebView", "Anthropic", "Codex"],
     ["CentOS", "BugMe"],
   );
 
@@ -118,7 +136,6 @@ test("curated vocabulary contains core dictation terms", async () => {
     "Ubuntu",
     "GitHub",
     "Kubernetes",
-    "Workday",
     "OpenSpec",
     "OpenClaw",
     "Fletcher",
@@ -130,6 +147,11 @@ test("curated vocabulary contains core dictation terms", async () => {
   assert.equal(terms.includes("codecs"), false);
   assert.equal(terms.includes("GraphQL"), false);
   assert.equal(terms.includes("WebView"), false);
+  assert.equal(terms.includes("Anthropic"), false);
+  assert.equal(terms.includes("Workday"), false);
+  assert.equal(terms.includes("frontend"), false);
+  assert.equal(terms.includes("backend"), false);
+  assert.equal(terms.includes("codebase"), false);
 });
 
 test("applies vocabulary while preserving settings and creates a backup", async () => {
