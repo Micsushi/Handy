@@ -121,37 +121,10 @@ test("removes blocked false-positive terms from every vocabulary source", () => 
   assert.deepEqual(merged, ["Existing", "Codex", "BugMe"]);
 });
 
-test("curated vocabulary contains core dictation terms", async () => {
+test("curated vocabulary contains only explicitly retained general terms", async () => {
   const terms = await loadCuratedTerms();
 
-  assert.ok(
-    terms.length <= 100,
-    `curated vocabulary has ${terms.length} terms; expected at most 100`,
-  );
-  for (const expected of [
-    "Codex",
-    "Claude",
-    "Claude Code",
-    "Linux",
-    "Ubuntu",
-    "GitHub",
-    "Kubernetes",
-    "OpenSpec",
-    "OpenClaw",
-    "Fletcher",
-    "bugz",
-    "hunterctl",
-  ]) {
-    assert.equal(terms.includes(expected), true, expected);
-  }
-  assert.equal(terms.includes("codecs"), false);
-  assert.equal(terms.includes("GraphQL"), false);
-  assert.equal(terms.includes("WebView"), false);
-  assert.equal(terms.includes("Anthropic"), false);
-  assert.equal(terms.includes("Workday"), false);
-  assert.equal(terms.includes("frontend"), false);
-  assert.equal(terms.includes("backend"), false);
-  assert.equal(terms.includes("codebase"), false);
+  assert.deepEqual(terms, ["Codex", "Claude"]);
 });
 
 test("applies vocabulary while preserving settings and creates a backup", async () => {
