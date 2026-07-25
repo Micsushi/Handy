@@ -16,6 +16,7 @@ pub mod portable;
 mod settings;
 mod shortcut;
 mod signal_handle;
+mod startup_ready;
 mod transcription_coordinator;
 mod tray;
 mod tray_i18n;
@@ -403,6 +404,29 @@ mod headless_guard_tests {
     }
 }
 
+fn should_show_main_window_for_second_instance(args: &[String]) -> bool {
+    !args.iter().any(|arg| arg == "--start-hidden")
+}
+
+#[cfg(test)]
+mod second_instance_visibility_tests {
+    use super::should_show_main_window_for_second_instance;
+
+    #[test]
+    fn start_hidden_second_instance_stays_hidden() {
+        let args = vec!["handy.exe".to_string(), "--start-hidden".to_string()];
+
+        assert!(!should_show_main_window_for_second_instance(&args));
+    }
+
+    #[test]
+    fn interactive_second_instance_shows_main_window() {
+        let args = vec!["handy.exe".to_string()];
+
+        assert!(should_show_main_window_for_second_instance(&args));
+    }
+}
+
 #[cfg(all(test, debug_assertions))]
 mod bindings_export_path_tests {
     use super::typescript_bindings_path;
@@ -681,6 +705,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::handy_keys::stop_handy_keys_recording,
             trigger_update_check,
             show_main_window_command,
+            startup_ready::mark_frontend_ready,
             commands::cancel_operation,
             commands::is_portable,
             commands::get_app_dir_path,
@@ -822,7 +847,7 @@ pub fn run(cli_args: CliArgs) {
                 signal_handle::send_transcription_input(app, "transcribe_with_post_process", "CLI");
             } else if args.iter().any(|a| a == "--cancel") {
                 crate::utils::cancel_current_operation(app);
-            } else {
+            } else if should_show_main_window_for_second_instance(&args) {
                 show_main_window(app);
             }
         }));
@@ -840,7 +865,7 @@ pub fn run(cli_args: CliArgs) {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            Some(vec![]),
+            Some(vec!["--start-hidden"]),
         ))
         .manage(cli_args.clone())
         .setup(move |app| {

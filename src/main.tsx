@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
 import App from "./App";
 import {
@@ -22,6 +23,10 @@ import "./i18n";
 // Initialize model store (loads models and sets up event listeners)
 import { useModelStore } from "./stores/modelStore";
 useModelStore.getState().initialize();
+
+void invoke("mark_frontend_ready").catch((error) => {
+  console.error("Failed to mark Handy frontend ready:", error);
+});
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
