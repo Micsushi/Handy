@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "...جاري التفريغ",
-    "processing": "...جاري المعالجة"
+    "processing": "...جاري المعالجة",
+    "loadingSpeechModel": "جارٍ تحميل نموذج الكلام...",
+    "systemBusy": "النظام مشغول — قد يستغرق النسخ وقتًا أطول"
   },
   "whatsNew": {
     "title": "الجديد في Handy v{{version}}"

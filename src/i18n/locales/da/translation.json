@@ -632,6 +632,8 @@
   },
   "overlay": {
     "transcribing": "Transskriberer...",
-    "processing": "Behandler..."
+    "processing": "Behandler...",
+    "loadingSpeechModel": "Indlæser talemodel...",
+    "systemBusy": "Systemet er optaget — transskriptionen kan tage længere tid"
   }
 }

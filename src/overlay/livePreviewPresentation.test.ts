@@ -4,6 +4,7 @@ import {
   LIVE_PREVIEW_REVEAL_MS,
   livePreviewPresentation,
   recordingPresentation,
+  streamWorkPresentation,
 } from "./livePreviewPresentation";
 
 describe("live preview presentation", () => {
@@ -49,6 +50,20 @@ describe("live preview presentation", () => {
     assert.deepEqual(recordingPresentation(true, true), {
       starting: false,
       listening: false,
+    });
+  });
+
+  test("presents delayed model loading explicitly", () => {
+    assert.deepEqual(streamWorkPresentation("loading_model"), {
+      labelKey: "overlay.loadingSpeechModel",
+      warning: false,
+    });
+  });
+
+  test("presents a slow device as an amber warning", () => {
+    assert.deepEqual(streamWorkPresentation("system_busy"), {
+      labelKey: "overlay.systemBusy",
+      warning: true,
     });
   });
 });

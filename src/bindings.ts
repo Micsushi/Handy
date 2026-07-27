@@ -1012,7 +1012,7 @@ export type StreamTextEvent = { committed: string; tentative: string }
 /**
  * Semantic kind of "working" phase, used to localize the spinner label.
  */
-export type StreamWorkKind = "transcribing" | "polishing"
+export type StreamWorkKind = "transcribing" | "polishing" | "loading_model" | "system_busy"
 /**
  * UI appearance mode. `System` follows the OS `prefers-color-scheme`; `Light`
  * and `Dark` force one of the two palettes Handy already ships.

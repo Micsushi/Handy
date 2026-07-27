@@ -15,6 +15,7 @@ import {
   LIVE_PREVIEW_REVEAL_MS,
   livePreviewPresentation,
   recordingPresentation,
+  streamWorkPresentation,
 } from "./livePreviewPresentation";
 
 type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
@@ -223,8 +224,8 @@ const RecordingOverlay: React.FC = () => {
 
   // spinner (left) | label (center) | cancel (right) — same 3-zone grid as the
   // listening row, so the label is centered.
-  const workingRow = (label: string, showCancel: boolean) => (
-    <div className="sbase">
+  const workingRow = (label: string, showCancel: boolean, warning = false) => (
+    <div className={`sbase ${warning ? "system-busy" : ""}`}>
       <div className="sbase-l">
         <span className="sspinner" />
       </div>
@@ -246,6 +247,7 @@ const RecordingOverlay: React.FC = () => {
       revealReady,
       working,
     );
+    const workPresentation = streamWorkPresentation(workKind);
 
     return (
       <div dir={direction} className={`ov-stage ${position}`}>
@@ -276,10 +278,9 @@ const RecordingOverlay: React.FC = () => {
           </div>
           {working
             ? workingRow(
-                workKind === "polishing"
-                  ? t("overlay.processing")
-                  : t("overlay.transcribing"),
+                t(workPresentation.labelKey),
                 true,
+                workPresentation.warning,
               )
             : recordingUi.starting
               ? workingRow(t("modelSelector.loadingGeneric"), true)

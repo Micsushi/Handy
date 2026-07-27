@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "Transkriberar...",
-    "processing": "Bearbetar..."
+    "processing": "Bearbetar...",
+    "loadingSpeechModel": "Läser in talmodell...",
+    "systemBusy": "Systemet är upptaget — transkriberingen kan ta längre tid"
   },
   "whatsNew": {
     "title": "Nytt i Handy v{{version}}"

@@ -35,6 +35,8 @@ use transcribe_rs::{
 
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_MODEL_LOADING_NOTICE_DELAY: Duration = Duration::from_secs(2);
+const STREAM_SLOW_COMPUTE_NOTICE_DELAY: Duration = Duration::from_secs(5);
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
@@ -81,6 +83,8 @@ pub enum StreamPhase {
 pub enum StreamWorkKind {
     Transcribing,
     Polishing,
+    LoadingModel,
+    SystemBusy,
 }
 
 /// Emitted to switch the streaming overlay to a working spinner.
@@ -101,6 +105,12 @@ enum StreamCmd {
     /// was ever active (caller should fall back to batch transcription).
     Finalize(mpsc::Sender<Option<String>>),
     Cancel,
+}
+
+enum StreamComputeWatchdogCmd {
+    Begin,
+    End,
+    Stop,
 }
 
 /// Routes real-time audio frames to the active streaming worker. Shared between
@@ -806,11 +816,24 @@ impl TranscriptionManager {
 
         // Wait for any in-progress model load to finish (start_stream races the
         // background load kicked off when recording starts).
+        let mut showed_loading_notice = false;
         {
             let mut is_loading = self.is_loading.lock().unwrap();
             while *is_loading {
-                is_loading = self.loading_condvar.wait(is_loading).unwrap();
+                let (guard, timeout) = self
+                    .loading_condvar
+                    .wait_timeout(is_loading, STREAM_MODEL_LOADING_NOTICE_DELAY)
+                    .unwrap();
+                is_loading = guard;
+                if *is_loading && timeout.timed_out() && !showed_loading_notice {
+                    showed_loading_notice = true;
+                    info!("Live preview is waiting for the speech model to finish loading");
+                    self.emit_stream_working(StreamWorkKind::LoadingModel);
+                }
             }
+        }
+        if showed_loading_notice {
+            self.emit_stream_listening();
         }
 
         let model_id = self.get_current_model().unwrap_or_default();
@@ -942,14 +965,18 @@ impl TranscriptionManager {
             );
 
             let mut perf = StreamPerf::new();
+            let busy_notice_active = Arc::new(AtomicBool::new(false));
+            let watchdog_tx = self.start_stream_compute_watchdog(Arc::clone(&busy_notice_active));
             while let Ok(cmd) = rx.recv() {
                 match cmd {
                     StreamCmd::Feed(pcm) => {
                         self.touch_activity();
                         perf.record_feed(pcm.len());
+                        let _ = watchdog_tx.send(StreamComputeWatchdogCmd::Begin);
                         let feed_start = Instant::now();
                         match stream.feed(&pcm) {
                             Ok(update) => {
+                                let _ = watchdog_tx.send(StreamComputeWatchdogCmd::End);
                                 perf.record_compute(feed_start.elapsed());
                                 perf.record_update(
                                     update.revision,
@@ -967,9 +994,51 @@ impl TranscriptionManager {
                                     perf.record_emit();
                                     self.emit_stream_text(&committed, &tentative);
                                 }
-                                perf.maybe_log();
+                                if let Some(observation) = perf.maybe_log() {
+                                    match observation.change {
+                                        Some(StreamHealthChange::Slowed) => {
+                                            if !busy_notice_active.swap(true, Ordering::AcqRel) {
+                                                warn!(
+                                                    "Live preview performance warning: system_busy=true, \
+                                                     speed={:.2}x, buffered={}ms, input_received={}ms, \
+                                                     committed_audio={}ms",
+                                                    perf.latest_interval_speed,
+                                                    perf.latest_buffered_ms,
+                                                    perf.latest_input_received_ms,
+                                                    perf.latest_audio_committed_ms,
+                                                );
+                                                self.emit_stream_working(
+                                                    StreamWorkKind::SystemBusy,
+                                                );
+                                            }
+                                        }
+                                        Some(StreamHealthChange::Recovered) => {
+                                            if busy_notice_active.swap(false, Ordering::AcqRel) {
+                                                info!(
+                                                    "Live preview performance recovered: system_busy=false, \
+                                                     speed={:.2}x, buffered={}ms",
+                                                    perf.latest_interval_speed,
+                                                    perf.latest_buffered_ms,
+                                                );
+                                                self.emit_stream_listening();
+                                            }
+                                        }
+                                        None if observation.speed >= 1.25
+                                            && busy_notice_active.swap(false, Ordering::AcqRel) =>
+                                        {
+                                            info!(
+                                                "Live preview performance recovered: system_busy=false, \
+                                                 speed={:.2}x, buffered={}ms",
+                                                observation.speed, perf.latest_buffered_ms,
+                                            );
+                                            self.emit_stream_listening();
+                                        }
+                                        None => {}
+                                    }
+                                }
                             }
                             Err(e) => {
+                                let _ = watchdog_tx.send(StreamComputeWatchdogCmd::End);
                                 perf.record_compute(feed_start.elapsed());
                                 warn!("stream feed failed: {}", e);
                             }
@@ -1014,6 +1083,7 @@ impl TranscriptionManager {
                     }
                 }
             }
+            let _ = watchdog_tx.send(StreamComputeWatchdogCmd::Stop);
 
             true
         };
@@ -1104,6 +1174,50 @@ impl TranscriptionManager {
             kind: Some(kind),
         }
         .emit(&self.app_handle);
+    }
+
+    fn emit_stream_listening(&self) {
+        let _ = StreamPhaseEvent {
+            phase: StreamPhase::Listening,
+            kind: None,
+        }
+        .emit(&self.app_handle);
+    }
+
+    fn start_stream_compute_watchdog(
+        &self,
+        busy_notice_active: Arc<AtomicBool>,
+    ) -> mpsc::Sender<StreamComputeWatchdogCmd> {
+        let (tx, rx) = mpsc::channel();
+        let manager = self.clone();
+        thread::spawn(move || {
+            while let Ok(command) = rx.recv() {
+                match command {
+                    StreamComputeWatchdogCmd::Begin => {
+                        match rx.recv_timeout(STREAM_SLOW_COMPUTE_NOTICE_DELAY) {
+                            Ok(StreamComputeWatchdogCmd::End) => {}
+                            Ok(StreamComputeWatchdogCmd::Stop)
+                            | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Ok(StreamComputeWatchdogCmd::Begin) => {}
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                if !busy_notice_active.swap(true, Ordering::AcqRel) {
+                                    warn!(
+                                        "Live preview performance warning: system_busy=true, \
+                                         a model feed has blocked for at least {:.1}s; correlate \
+                                         this timestamp with GlancesAgentMonitor telemetry",
+                                        STREAM_SLOW_COMPUTE_NOTICE_DELAY.as_secs_f64(),
+                                    );
+                                    manager.emit_stream_working(StreamWorkKind::SystemBusy);
+                                }
+                            }
+                        }
+                    }
+                    StreamComputeWatchdogCmd::End => {}
+                    StreamComputeWatchdogCmd::Stop => break,
+                }
+            }
+        });
+        tx
     }
 
     fn emit_stream_text(&self, committed: &str, tentative: &str) {
@@ -1446,6 +1560,10 @@ struct StreamPerf {
     latest_input_received_ms: i64,
     latest_audio_committed_ms: i64,
     latest_buffered_ms: i64,
+    last_logged_audio_secs: f64,
+    last_logged_compute_secs: f64,
+    latest_interval_speed: f64,
+    health: StreamHealthTracker,
 }
 
 impl StreamPerf {
@@ -1460,6 +1578,10 @@ impl StreamPerf {
             latest_input_received_ms: 0,
             latest_audio_committed_ms: 0,
             latest_buffered_ms: 0,
+            last_logged_audio_secs: 0.0,
+            last_logged_compute_secs: 0.0,
+            latest_interval_speed: 0.0,
+            health: StreamHealthTracker::default(),
         }
     }
 
@@ -1489,20 +1611,25 @@ impl StreamPerf {
         self.emit_count += 1;
     }
 
-    fn maybe_log(&mut self) {
-        if self.last_log.elapsed() < STREAM_PERF_LOG_INTERVAL {
-            return;
+    fn maybe_log(&mut self) -> Option<StreamPerfObservation> {
+        let interval = self.last_log.elapsed();
+        if interval < STREAM_PERF_LOG_INTERVAL {
+            return None;
         }
 
         let audio_secs = self.audio_secs();
         let compute_secs = self.compute_secs();
+        let interval_audio_secs = audio_secs - self.last_logged_audio_secs;
+        let interval_compute_secs = compute_secs - self.last_logged_compute_secs;
+        self.latest_interval_speed = real_time_factor(interval_audio_secs, interval_compute_secs);
         debug!(
-            "Live preview perf: {:.2}s streamed audio, {:.2}s model compute ({:.2}x real-time), \
+            "Live preview perf: {:.2}s streamed audio, {:.2}s model compute ({:.2}x total, {:.2}x recent), \
              input_received={:.2}s, committed_audio={:.2}s, buffered={}ms, revision={}, \
              {} frames fed, {} updates emitted",
             audio_secs,
             compute_secs,
             real_time_factor(audio_secs, compute_secs),
+            self.latest_interval_speed,
             self.latest_input_received_ms as f64 / 1000.0,
             self.latest_audio_committed_ms as f64 / 1000.0,
             self.latest_buffered_ms,
@@ -1510,7 +1637,13 @@ impl StreamPerf {
             self.feed_count,
             self.emit_count,
         );
+        self.last_logged_audio_secs = audio_secs;
+        self.last_logged_compute_secs = compute_secs;
         self.last_log = Instant::now();
+        Some(StreamPerfObservation {
+            speed: self.latest_interval_speed,
+            change: self.health.observe(self.latest_interval_speed, interval),
+        })
     }
 
     fn log_finalized(&self, chars: usize) {
@@ -1607,6 +1740,43 @@ fn transcribe_cpp_run_plan(
         task,
         language,
         target_language,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamHealthChange {
+    Slowed,
+    Recovered,
+}
+
+struct StreamPerfObservation {
+    speed: f64,
+    change: Option<StreamHealthChange>,
+}
+
+#[derive(Default)]
+struct StreamHealthTracker {
+    slow_for: Duration,
+    warned: bool,
+}
+
+impl StreamHealthTracker {
+    fn observe(&mut self, speed: f64, interval: Duration) -> Option<StreamHealthChange> {
+        if speed < 1.0 {
+            self.slow_for += interval;
+            if !self.warned && self.slow_for >= Duration::from_secs(10) {
+                self.warned = true;
+                return Some(StreamHealthChange::Slowed);
+            }
+            return None;
+        }
+
+        self.slow_for = Duration::ZERO;
+        if self.warned && speed >= 1.25 {
+            self.warned = false;
+            return Some(StreamHealthChange::Recovered);
+        }
+        None
     }
 }
 
@@ -2155,6 +2325,32 @@ mod tests {
             live_preview_stream_options("moonshine", "tiny"),
             StreamOptions::default()
         );
+    }
+
+    #[test]
+    fn stream_health_warns_after_sustained_slow_compute_and_recovers() {
+        let mut health = StreamHealthTracker::default();
+
+        assert_eq!(health.observe(0.8, Duration::from_secs(5)), None);
+        assert_eq!(
+            health.observe(0.7, Duration::from_secs(5)),
+            Some(StreamHealthChange::Slowed)
+        );
+        assert_eq!(health.observe(0.6, Duration::from_secs(5)), None);
+        assert_eq!(health.observe(1.1, Duration::from_secs(5)), None);
+        assert_eq!(
+            health.observe(1.3, Duration::from_secs(5)),
+            Some(StreamHealthChange::Recovered)
+        );
+    }
+
+    #[test]
+    fn healthy_stream_never_warns() {
+        let mut health = StreamHealthTracker::default();
+
+        for speed in [1.0, 1.4, 8.0] {
+            assert_eq!(health.observe(speed, Duration::from_secs(5)), None);
+        }
     }
 }
 

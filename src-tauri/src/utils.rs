@@ -12,6 +12,35 @@ pub use crate::clipboard::*;
 pub use crate::overlay::*;
 pub use crate::tray::*;
 
+fn desired_windows_process_priority_name() -> &'static str {
+    "above-normal"
+}
+
+/// Give latency-sensitive capture and transcription work preference over
+/// ordinary background installers without using the starvation-prone High or
+/// Realtime classes.
+pub fn apply_transcription_process_priority() {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+        };
+
+        let result = unsafe { SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) };
+        match result {
+            Ok(()) => info!(
+                "Process priority set to {} for latency-sensitive transcription",
+                desired_windows_process_priority_name()
+            ),
+            Err(error) => log::warn!(
+                "Could not set {} process priority: {}",
+                desired_windows_process_priority_name(),
+                error
+            ),
+        }
+    }
+}
+
 #[cfg(any(test, all(target_os = "windows", target_arch = "x86_64")))]
 const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
 
@@ -137,5 +166,10 @@ mod tests {
         assert!(!native_machine_is_arm64(Some(0x8664))); // AMD64
         assert!(!native_machine_is_arm64(Some(0x014c))); // I386
         assert!(!native_machine_is_arm64(None)); // API unavailable or failed
+    }
+
+    #[test]
+    fn windows_runtime_uses_above_normal_priority() {
+        assert_eq!(desired_windows_process_priority_name(), "above-normal");
     }
 }

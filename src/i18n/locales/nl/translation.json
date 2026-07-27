@@ -632,6 +632,8 @@
   },
   "overlay": {
     "transcribing": "Transcriberen...",
-    "processing": "Verwerken..."
+    "processing": "Verwerken...",
+    "loadingSpeechModel": "Spraakmodel laden...",
+    "systemBusy": "Systeem is bezig — transcriptie kan langer duren"
   }
 }

@@ -632,6 +632,8 @@
   },
   "overlay": {
     "transcribing": "Transcribing...",
-    "processing": "Processing..."
+    "processing": "Processing...",
+    "loadingSpeechModel": "Loading speech model...",
+    "systemBusy": "System busy — transcription may take longer"
   }
 }

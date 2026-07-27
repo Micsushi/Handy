@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "Обробка...",
-    "processing": "Постобробка..."
+    "processing": "Постобробка...",
+    "loadingSpeechModel": "Завантаження мовної моделі...",
+    "systemBusy": "Система зайнята — транскрибування може тривати довше"
   },
   "whatsNew": {
     "title": "Нове в Handy v{{version}}"

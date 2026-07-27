@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "מתמלל...",
-    "processing": "מעבד..."
+    "processing": "מעבד...",
+    "loadingSpeechModel": "טוען מודל דיבור...",
+    "systemBusy": "המערכת עמוסה — התמלול עשוי להימשך זמן רב יותר"
   },
   "whatsNew": {
     "title": "חדש ב-Handy v{{version}}"

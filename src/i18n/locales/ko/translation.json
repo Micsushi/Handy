@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "텍스트로 변환 중...",
-    "processing": "처리 중..."
+    "processing": "처리 중...",
+    "loadingSpeechModel": "음성 모델 로드 중...",
+    "systemBusy": "시스템 사용량이 높습니다 — 변환에 시간이 더 걸릴 수 있습니다"
   },
   "whatsNew": {
     "title": "Handy v{{version}}의 새 소식"

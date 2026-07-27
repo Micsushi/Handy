@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "Transcrevendo...",
-    "processing": "Processando..."
+    "processing": "Processando...",
+    "loadingSpeechModel": "Carregando modelo de fala...",
+    "systemBusy": "Sistema ocupado — a transcrição pode demorar mais"
   },
   "whatsNew": {
     "title": "Novidades no Handy v{{version}}"

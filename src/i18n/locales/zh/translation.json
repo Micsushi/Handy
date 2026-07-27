@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "正在转录...",
-    "processing": "处理中..."
+    "processing": "处理中...",
+    "loadingSpeechModel": "正在加载语音模型...",
+    "systemBusy": "系统繁忙 — 转录可能需要更长时间"
   },
   "whatsNew": {
     "title": "Handy v{{version}} 新功能"

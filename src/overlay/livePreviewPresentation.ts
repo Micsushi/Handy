@@ -19,3 +19,28 @@ export const recordingPresentation = (
   starting: !captureReady && !working,
   listening: captureReady && !working,
 });
+
+export const streamWorkPresentation = (kind: string) => {
+  switch (kind) {
+    case "loading_model":
+      return {
+        labelKey: "overlay.loadingSpeechModel",
+        warning: false,
+      };
+    case "system_busy":
+      return {
+        labelKey: "overlay.systemBusy",
+        warning: true,
+      };
+    case "polishing":
+      return {
+        labelKey: "overlay.processing",
+        warning: false,
+      };
+    default:
+      return {
+        labelKey: "overlay.transcribing",
+        warning: false,
+      };
+  }
+};

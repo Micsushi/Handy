@@ -367,3 +367,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.sbase.system-busy .sspinner {
+  border-top-color: #f59e0b;
+}
+.sbase.system-busy .swork-label {
+  color: #f59e0b;
+}

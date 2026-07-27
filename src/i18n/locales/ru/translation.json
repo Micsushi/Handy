@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "Расшифровка...",
-    "processing": "Обработка..."
+    "processing": "Обработка...",
+    "loadingSpeechModel": "Загрузка речевой модели...",
+    "systemBusy": "Система занята — расшифровка может занять больше времени"
   },
   "whatsNew": {
     "title": "Новое в Handy v{{version}}"

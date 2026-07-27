@@ -629,7 +629,9 @@
   },
   "overlay": {
     "transcribing": "Transkribiere...",
-    "processing": "Verarbeite..."
+    "processing": "Verarbeite...",
+    "loadingSpeechModel": "Sprachmodell wird geladen...",
+    "systemBusy": "System ausgelastet — die Transkription kann länger dauern"
   },
   "whatsNew": {
     "title": "Neu in Handy v{{version}}"
