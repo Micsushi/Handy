@@ -98,6 +98,15 @@ fn find_best_match<'a>(
         let custom_word_len = custom_word_key.key.chars().count();
         let exact_match = candidate == custom_word_key.key;
 
+        // Do not turn a complete word into a custom term by appending one
+        // character, such as "code" -> "Codex".
+        if !exact_match
+            && custom_word_len == candidate_len + 1
+            && custom_word_key.key.starts_with(candidate)
+        {
+            continue;
+        }
+
         // Short custom terms are too collision-prone for fuzzy matching:
         // Soundex can otherwise turn ordinary words such as "is" into "iOS"
         // or "on" into "ONNX". Exact normalized matches remain available.
@@ -436,6 +445,7 @@ mod tests {
             "Codex".to_string(),
             "Workday".to_string(),
             "Anthropic".to_string(),
+            "BugMe".to_string(),
         ];
 
         assert_eq!(apply_custom_words("is", &custom_words, 0.18), "is");
@@ -449,6 +459,8 @@ mod tests {
             apply_custom_words("another thing", &custom_words, 0.18),
             "another thing"
         );
+        assert_eq!(apply_custom_words("Code", &custom_words, 0.21), "Code");
+        assert_eq!(apply_custom_words("Bagmi", &custom_words, 0.21), "BugMe");
         assert_eq!(apply_custom_words("ios", &custom_words, 0.18), "iOS");
         assert_eq!(apply_custom_words("codecs", &custom_words, 0.18), "Codex");
     }
