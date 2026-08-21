@@ -1,6 +1,7 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
 import { Dropdown } from "../ui/Dropdown";
+import { Button } from "../ui/Button";
 import { SettingContainer } from "../ui/SettingContainer";
 import { useSettings } from "../../hooks/useSettings";
 import type { OverlayPosition, OverlayStyle } from "@/bindings";
@@ -73,14 +74,28 @@ export const ShowOverlay: React.FC<ShowOverlayProps> = React.memo(
             descriptionMode={descriptionMode}
             grouped={grouped}
           >
-            <Dropdown
-              options={positionOptions}
-              selectedValue={selectedPosition}
-              onSelect={(value) =>
-                updateSetting("overlay_position", value as OverlayPosition)
-              }
-              disabled={isUpdating("overlay_position")}
-            />
+            <div className="flex items-center gap-2">
+              <Dropdown
+                options={positionOptions}
+                selectedValue={selectedPosition}
+                onSelect={(value) =>
+                  updateSetting("overlay_position", value as OverlayPosition)
+                }
+                disabled={isUpdating("overlay_position")}
+              />
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  updateSetting("overlay_position", selectedPosition)
+                }
+                disabled={isUpdating("overlay_position")}
+              >
+                {t("settings.advanced.overlay.position.reset", {
+                  defaultValue: "Reset",
+                })}
+              </Button>
+            </div>
           </SettingContainer>
         )}
       </>

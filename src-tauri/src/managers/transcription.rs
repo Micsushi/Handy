@@ -1780,11 +1780,9 @@ impl StreamHealthTracker {
     }
 }
 
-/// Prefer quick, rewriteable hypotheses for the live overlay. Parakeet Unified's
-/// native best-accuracy geometry waits for a 1040 ms chunk plus 1040 ms of right
-/// context. Its trained menu also supports 560 + 80 ms, which gives the overlay
-/// a first provisional decode after roughly 640 ms. OnFinalize keeps that text
-/// fully tentative, so the preview can revise freely until recording stops.
+/// Keep Parakeet Unified's native accuracy geometry for the live overlay. The
+/// lower-latency 560 + 80 ms profile can omit the first word after long pauses.
+/// OnFinalize keeps the preview rewriteable until recording stops.
 fn live_preview_stream_options(arch: &str, variant: &str) -> StreamOptions {
     if arch == "parakeet" && variant == "unified-en-0.6b" {
         return StreamOptions {
@@ -1792,8 +1790,8 @@ fn live_preview_stream_options(arch: &str, variant: &str) -> StreamOptions {
             family: Some(StreamExtension::ParakeetBuffered(
                 ParakeetBufferedStreamOptions {
                     left_ms: None,
-                    chunk_ms: Some(560),
-                    right_ms: Some(80),
+                    chunk_ms: Some(1040),
+                    right_ms: Some(1040),
                 },
             )),
             ..Default::default()
@@ -2295,7 +2293,7 @@ mod tests {
     }
 
     #[test]
-    fn unified_parakeet_live_preview_prefers_subsecond_unstable_text() {
+    fn unified_parakeet_live_preview_preserves_accuracy_context() {
         let options = live_preview_stream_options("parakeet", "unified-en-0.6b");
 
         assert!(matches!(
@@ -2308,8 +2306,8 @@ mod tests {
             Some(transcribe_cpp::StreamExtension::ParakeetBuffered(
                 transcribe_cpp::ParakeetBufferedStreamOptions {
                     left_ms: None,
-                    chunk_ms: Some(560),
-                    right_ms: Some(80),
+                    chunk_ms: Some(1040),
+                    right_ms: Some(1040),
                 }
             ))
         ));

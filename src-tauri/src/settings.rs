@@ -118,6 +118,12 @@ pub enum OverlayPosition {
     Bottom,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+pub struct OverlayCoordinates {
+    pub x: i32,
+    pub y: i32,
+}
+
 /// Which recording overlay to display. `Minimal` and `Live` share one base
 /// (the pill); `Live` grows into the panel that shows live transcription text.
 /// `None` hides the overlay entirely. Decoupled from whether the model runs in
@@ -387,6 +393,8 @@ pub struct AppSettings {
     pub selected_language: String,
     #[serde(default = "default_overlay_position")]
     pub overlay_position: OverlayPosition,
+    #[serde(default)]
+    pub overlay_custom_position: Option<OverlayCoordinates>,
     #[serde(default = "default_debug_mode")]
     pub debug_mode: bool,
     #[serde(default = "default_log_level")]
@@ -857,6 +865,7 @@ pub fn get_default_settings() -> AppSettings {
         translate_to_english: false,
         selected_language: "auto".to_string(),
         overlay_position: default_overlay_position(),
+        overlay_custom_position: None,
         debug_mode: false,
         log_level: default_log_level(),
         custom_words: Vec::new(),

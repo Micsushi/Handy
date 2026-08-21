@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import "./RecordingOverlay.css";
@@ -176,6 +177,32 @@ const RecordingOverlay: React.FC = () => {
   const fmtTime = (s: number) =>
     `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
+  const moveOverlay = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const overlayWindow = getCurrentWindow();
+    try {
+      await commands.setOverlayDragTracking(true);
+      await overlayWindow.startDragging();
+    } catch (error) {
+      await commands.setOverlayDragTracking(false);
+      console.error("Failed to move recording overlay", error);
+    }
+  };
+
+  const dragHandle = (
+    <button
+      type="button"
+      className="sdrag"
+      aria-label={t("settings.advanced.overlay.position.move", {
+        defaultValue: "Move recording overlay",
+      })}
+      onMouseDown={moveOverlay}
+    >
+      <span aria-hidden="true" />
+    </button>
+  );
+
   // ---- Shared building blocks (one visual language for every overlay form) ----
   const waveform = (
     <div className="swave">
@@ -257,6 +284,7 @@ const RecordingOverlay: React.FC = () => {
             recordingUi.listening ? "capture-ready" : "capture-starting"
           } ${isVisible ? "" : "leaving"}`}
         >
+          {dragHandle}
           <div className="stext">
             <div className="stext-clip">
               <div
@@ -310,6 +338,7 @@ const RecordingOverlay: React.FC = () => {
           recordingUi.listening ? "capture-ready" : "capture-starting"
         }`}
       >
+        {dragHandle}
         {working
           ? workingRow(workLabel, true)
           : recordingUi.starting

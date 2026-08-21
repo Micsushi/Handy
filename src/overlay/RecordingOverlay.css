@@ -117,6 +117,7 @@
 
 /* Shared base card. Flat: theme surface + hairline border, no shadow or blur. */
 .scard {
+  position: relative;
   width: var(--ov-pill-w);
   border-radius: 24px;
   overflow: hidden;
@@ -133,6 +134,45 @@
     width 460ms cubic-bezier(0.22, 1, 0.36, 1),
     border-radius 460ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform, width, opacity;
+}
+.sdrag {
+  position: absolute;
+  z-index: 3;
+  top: 2px;
+  left: 50%;
+  width: 32px;
+  height: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--s-faint);
+  cursor: grab;
+  transform: translateX(-50%);
+}
+.sdrag:active {
+  cursor: grabbing;
+}
+.sdrag span,
+.sdrag span::before,
+.sdrag span::after {
+  position: absolute;
+  top: 4px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+.sdrag span {
+  left: 14px;
+}
+.sdrag span::before {
+  left: -6px;
+  top: 0;
+}
+.sdrag span::after {
+  left: 6px;
+  top: 0;
 }
 @keyframes scard-pop {
   from {

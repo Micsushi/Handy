@@ -61,6 +61,7 @@ fn overlay_dimensions(state: &str) -> (f64, f64) {
 
 static LAST_MIC_LEVEL_EMIT: AtomicU64 = AtomicU64::new(0);
 const EMIT_THROTTLE_MS: u64 = 33; // ~30 FPS
+static PERSIST_CUSTOM_OVERLAY_MOVES: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 const OVERLAY_TOP_OFFSET: f64 = 46.0;
@@ -222,6 +223,44 @@ fn is_mouse_within_monitor(
         && mouse_y < (monitor_y + monitor_height as i32)
 }
 
+pub fn set_overlay_drag_tracking(enabled: bool) {
+    PERSIST_CUSTOM_OVERLAY_MOVES.store(enabled, Ordering::Relaxed);
+}
+
+fn custom_position_from_move(
+    drag_tracking_enabled: bool,
+    position: PhysicalPosition<i32>,
+) -> Option<settings::OverlayCoordinates> {
+    drag_tracking_enabled.then_some(settings::OverlayCoordinates {
+        x: position.x,
+        y: position.y,
+    })
+}
+
+pub fn persist_custom_overlay_position(
+    app_handle: &AppHandle,
+    window_label: &str,
+    position: PhysicalPosition<i32>,
+) {
+    if window_label != "recording_overlay" {
+        return;
+    }
+
+    let Some(custom_position) = custom_position_from_move(
+        PERSIST_CUSTOM_OVERLAY_MOVES.load(Ordering::Relaxed),
+        position,
+    ) else {
+        return;
+    };
+
+    let mut app_settings = settings::get_settings(app_handle);
+    if app_settings.overlay_custom_position == Some(custom_position) {
+        return;
+    }
+    app_settings.overlay_custom_position = Some(custom_position);
+    settings::write_settings(app_handle, app_settings);
+}
+
 /// Returns overlay position in logical coordinates (points on macOS).
 ///
 /// The Bottom anchor uses the macOS work area (visibleFrame) so the overlay
@@ -309,6 +348,39 @@ fn windows_overlay_bounds(
     (x, y, width, height)
 }
 
+#[cfg(target_os = "windows")]
+fn clamp_windows_overlay_position(
+    monitor_position: PhysicalPosition<i32>,
+    monitor_size: PhysicalSize<u32>,
+    overlay_width: i32,
+    overlay_height: i32,
+    requested: PhysicalPosition<i32>,
+) -> PhysicalPosition<i32> {
+    let max_x =
+        (monitor_position.x + monitor_size.width as i32 - overlay_width).max(monitor_position.x);
+    let max_y =
+        (monitor_position.y + monitor_size.height as i32 - overlay_height).max(monitor_position.y);
+
+    PhysicalPosition::new(
+        requested.x.clamp(monitor_position.x, max_x),
+        requested.y.clamp(monitor_position.y, max_y),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn monitor_for_physical_point(
+    app_handle: &AppHandle,
+    point: PhysicalPosition<i32>,
+) -> Option<tauri::Monitor> {
+    app_handle
+        .available_monitors()
+        .ok()?
+        .into_iter()
+        .find(|monitor| {
+            is_mouse_within_monitor((point.x, point.y), monitor.position(), monitor.size())
+        })
+}
+
 /// Moves and sizes the overlay in one native SetWindowPos, bypassing tao's
 /// current-DPI logical conversion that mislands cross-monitor moves.
 #[cfg(target_os = "windows")]
@@ -320,16 +392,34 @@ fn place_windows_overlay(
 ) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
 
-    let monitor = get_monitor_with_cursor(app_handle)
+    let app_settings = settings::get_settings(app_handle);
+    let requested_position = app_settings
+        .overlay_custom_position
+        .map(|position| PhysicalPosition::new(position.x, position.y));
+    let monitor = requested_position
+        .and_then(|position| monitor_for_physical_point(app_handle, position))
+        .or_else(|| get_monitor_with_cursor(app_handle))
         .ok_or_else(|| "failed to determine the monitor containing the cursor".to_string())?;
-    let (x, y, width, height) = windows_overlay_bounds(
+    let (preset_x, preset_y, width, height) = windows_overlay_bounds(
         *monitor.position(),
         *monitor.size(),
         monitor.scale_factor(),
         logical_width,
         logical_height,
-        settings::get_settings(app_handle).overlay_position,
+        app_settings.overlay_position,
     );
+    let position = requested_position
+        .map(|requested| {
+            clamp_windows_overlay_position(
+                *monitor.position(),
+                *monitor.size(),
+                width,
+                height,
+                requested,
+            )
+        })
+        .unwrap_or_else(|| PhysicalPosition::new(preset_x, preset_y));
+    let (x, y) = (position.x, position.y);
     let hwnd = overlay_window
         .hwnd()
         .map_err(|error| format!("failed to get overlay window handle: {error}"))?;
@@ -735,6 +825,32 @@ mod tests {
                 OverlayPosition::Bottom,
             ),
             (-1530, 1040, 500, 150)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_custom_overlay_bounds_stay_inside_monitor() {
+        assert_eq!(
+            clamp_windows_overlay_position(
+                PhysicalPosition::new(-2560, -200),
+                PhysicalSize::new(2560, 1440),
+                500,
+                150,
+                PhysicalPosition::new(-2800, 1300),
+            ),
+            PhysicalPosition::new(-2560, 1090)
+        );
+    }
+
+    #[test]
+    fn overlay_move_coordinates_require_an_active_drag() {
+        let position = PhysicalPosition::new(640, 360);
+
+        assert_eq!(custom_position_from_move(false, position), None);
+        assert_eq!(
+            custom_position_from_move(true, position),
+            Some(settings::OverlayCoordinates { x: 640, y: 360 })
         );
     }
 }

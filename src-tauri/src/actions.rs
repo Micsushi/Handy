@@ -101,6 +101,10 @@ fn should_use_streaming_overlay(style: OverlayStyle, is_streaming: bool) -> bool
     style == OverlayStyle::Live && is_streaming
 }
 
+fn should_retranscribe_stream_final(model_id: Option<&str>) -> bool {
+    model_id.is_some_and(|id| id.starts_with("handy-computer/parakeet-unified-en-0.6b-gguf/"))
+}
+
 fn start_capture_before_ui<T>(
     start_capture: impl FnOnce() -> Result<T, String>,
     show_ui: impl FnOnce(),
@@ -686,18 +690,23 @@ impl ShortcutAction for TranscribeAction {
                         crate::audio_toolkit::save_wav_file(&wav_path, &samples_for_wav)
                     });
 
-                    // Transcribe concurrently with WAV save. If a live stream was
-                    // running, finalize it and use its text (all audio was already
-                    // fed to the stream); otherwise batch-transcribe the samples.
+                    // Transcribe concurrently with WAV save. Parakeet Unified's
+                    // streaming decoder can omit words after pauses even when the
+                    // complete recording batch-transcribes correctly, so its stream
+                    // remains a preview and batch decoding supplies the final text.
                     let transcription_time = Instant::now();
+                    let retranscribe_stream_final =
+                        should_retranscribe_stream_final(tm.get_current_model().as_deref());
                     let transcription_result = match tm.finalize_stream() {
                         // A finalized stream with usable text wins. An empty result
                         // (no active stream, produced nothing, or a finalize error
                         // after the engine was returned) falls back to a full batch
                         // transcription of the same audio. A finalize timeout is
-                        // surfaced instead — the worker may still hold the engine,
+                        // surfaced instead; the worker may still hold the engine,
                         // so a batch fallback would contend with it.
-                        Ok(Some(text)) if !text.trim().is_empty() => Ok(text),
+                        Ok(Some(text)) if !text.trim().is_empty() && !retranscribe_stream_final => {
+                            Ok(text)
+                        }
                         Ok(_) => tm.transcribe(samples),
                         Err(err) => Err(err),
                     };
@@ -926,8 +935,8 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay,
-        start_capture_before_ui,
+        complete_unless_cancelled, is_blank_transcription, should_retranscribe_stream_final,
+        should_use_streaming_overlay, start_capture_before_ui,
     };
     use crate::settings::OverlayStyle;
     use std::future;
@@ -983,6 +992,17 @@ mod tests {
         assert!(!should_use_streaming_overlay(OverlayStyle::Live, false));
         assert!(!should_use_streaming_overlay(OverlayStyle::Minimal, true));
         assert!(!should_use_streaming_overlay(OverlayStyle::None, true));
+    }
+
+    #[test]
+    fn parakeet_unified_stream_final_is_retranscribed_in_batch() {
+        assert!(should_retranscribe_stream_final(Some(
+            "handy-computer/parakeet-unified-en-0.6b-gguf/parakeet-unified-en-0.6b-Q8_0.gguf"
+        )));
+        assert!(!should_retranscribe_stream_final(Some(
+            "handy-computer/nemotron-speech-streaming-en-0.6b-gguf/nemotron-speech-streaming-en-0.6b-Q8_0.gguf"
+        )));
+        assert!(!should_retranscribe_stream_final(None));
     }
 
     #[test]

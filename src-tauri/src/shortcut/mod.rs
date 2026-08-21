@@ -573,6 +573,7 @@ pub fn change_selected_language_setting(app: AppHandle, language: String) -> Res
 #[tauri::command]
 #[specta::specta]
 pub fn change_overlay_position_setting(app: AppHandle, position: String) -> Result<(), String> {
+    crate::overlay::set_overlay_drag_tracking(false);
     let mut settings = settings::get_settings(&app);
     let parsed = match position.as_str() {
         // "none" is retired (visibility is overlay_style now); fold legacy callers
@@ -585,6 +586,7 @@ pub fn change_overlay_position_setting(app: AppHandle, position: String) -> Resu
         }
     };
     settings.overlay_position = parsed;
+    settings.overlay_custom_position = None;
     settings::write_settings(&app, settings);
 
     // Whether the overlay shows at all is owned by overlay_style now; position
@@ -593,6 +595,12 @@ pub fn change_overlay_position_setting(app: AppHandle, position: String) -> Resu
     crate::utils::update_overlay_position(&app);
 
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn set_overlay_drag_tracking(enabled: bool) {
+    crate::overlay::set_overlay_drag_tracking(enabled);
 }
 
 #[tauri::command]
