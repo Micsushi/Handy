@@ -53,49 +53,72 @@ fn paste_via_clipboard(
 
     std::thread::sleep(Duration::from_millis(paste_delay_ms));
 
-    // Send paste key combo
-    #[cfg(target_os = "linux")]
-    let key_combo_sent = try_send_key_combo_linux(paste_method)?;
+    let restore_clipboard = || {
+        // Restore original clipboard content.
+        // Text takes priority so this path stays identical to the previous behavior;
+        // an image is only restored when the clipboard held no text at all, which is
+        // the case that used to silently wipe screenshots.
+        if let Some(clipboard_content) = saved_text.as_ref() {
+            // On Wayland, prefer wl-copy for better compatibility
+            #[cfg(target_os = "linux")]
+            if is_wayland() && is_wl_copy_available() {
+                let _ = write_clipboard_via_wl_copy(clipboard_content);
+            } else {
+                let _ = clipboard.write_text(clipboard_content);
+            }
 
-    #[cfg(not(target_os = "linux"))]
-    let key_combo_sent = false;
-
-    // Fall back to enigo if no native tool handled it
-    if !key_combo_sent {
-        match paste_method {
-            PasteMethod::CtrlV => input::send_paste_ctrl_v(enigo)?,
-            PasteMethod::CtrlShiftV => input::send_paste_ctrl_shift_v(enigo)?,
-            PasteMethod::ShiftInsert => input::send_paste_shift_insert(enigo)?,
-            _ => return Err("Invalid paste method for clipboard paste".into()),
-        }
-    }
-
-    std::thread::sleep(Duration::from_millis(paste_delay_after_ms));
-
-    // Restore original clipboard content.
-    // Text takes priority so this path stays identical to the previous behavior;
-    // an image is only restored when the clipboard held no text at all, which is
-    // the case that used to silently wipe screenshots.
-    if let Some(clipboard_content) = saved_text {
-        // On Wayland, prefer wl-copy for better compatibility
-        #[cfg(target_os = "linux")]
-        if is_wayland() && is_wl_copy_available() {
-            let _ = write_clipboard_via_wl_copy(&clipboard_content);
+            #[cfg(not(target_os = "linux"))]
+            let _ = clipboard.write_text(clipboard_content);
+        } else if let Some(image) = saved_image.as_ref() {
+            info!("Restoring image to clipboard");
+            let _ = clipboard.write_image(image);
         } else {
-            let _ = clipboard.write_text(&clipboard_content);
+            // Nothing was there to begin with: do not leave the transcription behind.
+            let _ = clipboard.clear();
         }
+    };
 
-        #[cfg(not(target_os = "linux"))]
-        let _ = clipboard.write_text(&clipboard_content);
-    } else if let Some(image) = saved_image {
-        info!("Restoring image to clipboard");
-        let _ = clipboard.write_image(&image);
-    } else {
-        // Nothing was there to begin with — don't leave the transcription behind.
-        let _ = clipboard.clear();
+    run_with_restore(
+        || {
+            // Send paste key combo
+            #[cfg(target_os = "linux")]
+            let key_combo_sent = try_send_key_combo_linux(paste_method)?;
+
+            #[cfg(not(target_os = "linux"))]
+            let key_combo_sent = false;
+
+            // Fall back to enigo if no native tool handled it
+            if !key_combo_sent {
+                match paste_method {
+                    PasteMethod::CtrlV => input::send_paste_ctrl_v(enigo)?,
+                    PasteMethod::CtrlShiftV => input::send_paste_ctrl_shift_v(enigo)?,
+                    PasteMethod::ShiftInsert => input::send_paste_shift_insert(enigo)?,
+                    _ => return Err("Invalid paste method for clipboard paste".into()),
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(paste_delay_after_ms));
+            Ok(())
+        },
+        restore_clipboard,
+    )
+}
+
+fn run_with_restore<Paste, Restore>(paste: Paste, restore: Restore) -> Result<(), String>
+where
+    Paste: FnOnce() -> Result<(), String>,
+    Restore: FnOnce(),
+{
+    match paste() {
+        Ok(()) => {
+            restore();
+            Ok(())
+        }
+        Err(error) => {
+            restore();
+            Err(error)
+        }
     }
-
-    Ok(())
 }
 
 /// Attempts to send a key combination using Linux-native tools.
@@ -705,5 +728,26 @@ mod tests {
         assert!(should_send_auto_submit(true, PasteMethod::Direct));
         assert!(should_send_auto_submit(true, PasteMethod::CtrlShiftV));
         assert!(should_send_auto_submit(true, PasteMethod::ShiftInsert));
+    }
+
+    #[test]
+    fn clipboard_restore_runs_after_paste_error_and_keeps_error() {
+        let mut restored = false;
+        let result = run_with_restore(
+            || Err("synthetic key injection failure".to_string()),
+            || restored = true,
+        );
+
+        assert_eq!(result, Err("synthetic key injection failure".to_string()));
+        assert!(restored);
+    }
+
+    #[test]
+    fn clipboard_restore_runs_after_success() {
+        let mut restored = false;
+        let result = run_with_restore(|| Ok(()), || restored = true);
+
+        assert_eq!(result, Ok(()));
+        assert!(restored);
     }
 }
