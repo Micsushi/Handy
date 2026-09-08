@@ -6,7 +6,7 @@ use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tauri_specta::Event;
 
@@ -353,28 +353,42 @@ impl HistoryManager {
         }
 
         let conn = self.get_connection()?;
+        Self::delete_entries_and_files_with_conn(&conn, &self.recordings_dir, entries)
+    }
+
+    fn delete_entries_and_files_with_conn(
+        conn: &Connection,
+        recordings_dir: &Path,
+        entries: &[(i64, String)],
+    ) -> Result<usize> {
         let mut deleted_count = 0;
 
         for (id, file_name) in entries {
-            // Delete database entry
+            // Delete WAV file
+            let file_path = recordings_dir.join(file_name);
+            if let Err(e) = Self::delete_audio_file(&file_path, file_name) {
+                error!("{}", e);
+                return Err(e);
+            }
+
+            // Delete the database entry only after the audio file is gone.
             conn.execute(
                 "DELETE FROM transcription_history WHERE id = ?1",
                 params![id],
             )?;
-
-            // Delete WAV file
-            let file_path = self.recordings_dir.join(file_name);
-            if file_path.exists() {
-                if let Err(e) = fs::remove_file(&file_path) {
-                    error!("Failed to delete WAV file {}: {}", file_name, e);
-                } else {
-                    debug!("Deleted old WAV file: {}", file_name);
-                    deleted_count += 1;
-                }
-            }
+            debug!("Deleted old WAV file: {}", file_name);
+            deleted_count += 1;
         }
 
         Ok(deleted_count)
+    }
+
+    fn delete_audio_file(path: &Path, file_name: &str) -> Result<()> {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow!("Failed to delete WAV file {}: {}", file_name, e)),
+        }
     }
 
     fn cleanup_by_count(&self, limit: usize) -> Result<()> {
@@ -614,11 +628,9 @@ impl HistoryManager {
         if let Some(entry) = self.get_entry_by_id(id).await? {
             // Delete the audio file first
             let file_path = self.get_audio_file_path(&entry.file_name);
-            if file_path.exists() {
-                if let Err(e) = fs::remove_file(&file_path) {
-                    error!("Failed to delete audio file {}: {}", entry.file_name, e);
-                    // Continue with database deletion even if file deletion fails
-                }
+            if let Err(e) = Self::delete_audio_file(&file_path, &entry.file_name) {
+                error!("{}", e);
+                return Err(e);
             }
         }
 
@@ -733,5 +745,79 @@ mod tests {
 
         assert_eq!(entry.timestamp, 100);
         assert_eq!(entry.transcription_text, "completed");
+    }
+
+    #[test]
+    fn cleanup_deletes_file_before_database_row() {
+        let conn = setup_conn();
+        insert_entry(&conn, 100, "recording", None);
+        let recordings_dir = tempfile::tempdir().expect("create recordings directory");
+        let file_path = recordings_dir.path().join("handy-100.wav");
+        fs::write(&file_path, b"synthetic wav").expect("write synthetic WAV");
+
+        let deleted = HistoryManager::delete_entries_and_files_with_conn(
+            &conn,
+            recordings_dir.path(),
+            &[(1, "handy-100.wav".to_string())],
+        )
+        .expect("delete file and row");
+
+        assert_eq!(deleted, 1);
+        assert!(!file_path.exists());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM transcription_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn cleanup_keeps_database_row_when_wav_deletion_fails() {
+        let conn = setup_conn();
+        insert_entry(&conn, 100, "recording", None);
+        let recordings_dir = tempfile::tempdir().expect("create recordings directory");
+        let file_path = recordings_dir.path().join("handy-100.wav");
+        fs::create_dir(&file_path).expect("create undeletable file fixture");
+
+        let result = HistoryManager::delete_entries_and_files_with_conn(
+            &conn,
+            recordings_dir.path(),
+            &[(1, "handy-100.wav".to_string())],
+        );
+
+        assert!(result.is_err());
+        assert!(file_path.is_dir());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM transcription_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_wav_is_treated_as_already_deleted() {
+        let conn = setup_conn();
+        insert_entry(&conn, 100, "recording", None);
+        let recordings_dir = tempfile::tempdir().expect("create recordings directory");
+
+        let deleted = HistoryManager::delete_entries_and_files_with_conn(
+            &conn,
+            recordings_dir.path(),
+            &[(1, "handy-100.wav".to_string())],
+        )
+        .expect("delete row without missing WAV");
+
+        assert_eq!(deleted, 1);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM transcription_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
     }
 }
